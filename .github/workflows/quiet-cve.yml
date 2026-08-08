@@ -1,0 +1,147 @@
+# quiet-cve 自身に対する定期スキャン（ドッグフーディング）
+#
+# examples/github-actions/quiet-cve-scan.yml を、このリポジトリ用に調整したもの。
+# 違いは 2 点だけ:
+#   - quiet-cve/ が入れ子になっていないので QUIET_CVE_DIR ではなくリポジトリ直下を見る
+#   - 動作確認用に、パッケージを直接指定して走らせる workflow_dispatch の入力がある
+#
+# quiet-cve 自体は Python 標準ライブラリしか使わないため、通常の実行では
+# 依存 0 件・検出 0 件になる。それが正しい結果で、この定期実行が主に確かめているのは
+# 「スクリプトと OSV / KEV への経路が今日も生きているか」のほう。
+#
+# 他プロジェクトに導入するときは examples/ のテンプレートをコピーすること。
+
+name: quiet-cve
+
+on:
+  schedule:
+    # 毎週月曜 07:00 JST（GitHub の cron は UTC）
+    - cron: "0 22 * * 0"
+  workflow_dispatch:
+    inputs:
+      packages:
+        description: "動作確認用。ecosystem:name@version をスペース区切りで（空ならリポジトリを普通にスキャン）"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: quiet-cve
+  cancel-in-progress: false
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: OSV / KEV に照会
+        id: scan
+        env:
+          PACKAGES: ${{ inputs.packages }}
+        run: |
+          set -f  # $PACKAGES を単語分割はさせるが glob は展開させない
+          code=0
+          if [ -n "$PACKAGES" ]; then
+            echo "::notice::動作確認モード: $PACKAGES"
+            python3 scripts/osv_query.py --packages $PACKAGES --out scan.json || code=$?
+          else
+            python3 scripts/osv_query.py --project-root . --out scan.json || code=$?
+          fi
+          echo "code=$code" >> "$GITHUB_OUTPUT"
+          # code=2 は「通信に失敗した」の意味。結果が空でも安全ではない。
+          # ここでは落とさず、artifact を残してから最後のステップで落とす。
+
+      - name: 要約（ignore 適用・分類）
+        id: summary
+        if: steps.scan.outputs.code != '2'
+        run: |
+          python3 scripts/ci_summary.py \
+            --scan scan.json \
+            --out summary.json \
+            --markdown issue-body.md \
+            --repo "$GITHUB_REPOSITORY"
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import json
+          s = json.load(open("summary.json"))
+          c = s["counts"]
+          print(f"needs_triage={str(s['needs_triage']).lower()}")
+          print(f"act={c['act']}")
+          print(f"watch={c['watch']}")
+          print(f"title={s['issue']['title_prefix']} 要トリアージ {c['act'] + c['watch']} 件（KEV {c['act']} 件）")
+          print("labels=" + ",".join(s["issue"]["labels"]))
+          print("assignees=" + ",".join(s["issue"]["assignees"]))
+          PY
+
+      - name: 生の検出結果を artifact に残す
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: quiet-cve-scan
+          path: |
+            scan.json
+            summary.json
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: ジョブサマリーに出す
+        if: steps.scan.outputs.code != '2'
+        run: cat issue-body.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Issue を起票 / 更新
+        if: steps.scan.outputs.code != '2' && steps.summary.outputs.needs_triage == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          LABELS: ${{ steps.summary.outputs.labels }}
+          ASSIGNEES: ${{ steps.summary.outputs.assignees }}
+          TITLE: ${{ steps.summary.outputs.title }}
+          ACT: ${{ steps.summary.outputs.act }}
+          WATCH: ${{ steps.summary.outputs.watch }}
+        run: |
+          # 無いラベルを指定すると gh issue create が失敗するので先に用意する。
+          # gh label は新しめの gh にしか無いので REST API を直接叩く（既存なら 422 で無視）。
+          label_args=()
+          IFS=',' read -ra names <<< "$LABELS"
+          for name in "${names[@]}"; do
+            [ -z "$name" ] && continue
+            gh api -X POST "repos/$GITHUB_REPOSITORY/labels" \
+              -f name="$name" -f color=ededed >/dev/null 2>&1 || true
+            label_args+=(--label "$name")
+          done
+
+          assignee_args=()
+          IFS=',' read -ra who <<< "$ASSIGNEES"
+          for name in "${who[@]}"; do
+            [ -n "$name" ] && assignee_args+=(--assignee "$name")
+          done
+
+          # 本文の marker で自分が立てた issue を見つける（dedupe）
+          existing=$(gh issue list --state open --label quiet-cve --limit 30 \
+            --json number,body \
+            --jq '[.[] | select(.body | contains("quiet-cve-ci-scan")) | .number] | first // empty')
+
+          if [ -n "$existing" ]; then
+            gh issue edit "$existing" --title "$TITLE" --body-file issue-body.md
+            echo "更新: #$existing"
+            # 本文は毎回黙って差し替える。通知を飛ばすのは KEV 掲載があるときだけ。
+            if [ "$ACT" -gt 0 ]; then
+              gh issue comment "$existing" \
+                --body "定期スキャンで KEV 掲載の脆弱性を $ACT 件検出しました（要トリアージ計 $((ACT + WATCH)) 件）。本文を更新しています。"
+            fi
+          else
+            gh issue create --title "$TITLE" --body-file issue-body.md \
+              "${label_args[@]}" "${assignee_args[@]}"
+          fi
+
+      - name: 通信失敗なら落とす
+        if: steps.scan.outputs.code == '2'
+        run: |
+          echo "::error::OSV.dev / KEV への照会に失敗しました。検出 0 件は「脆弱性なし」を意味しません。"
+          exit 1
