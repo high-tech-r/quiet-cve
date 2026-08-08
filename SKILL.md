@@ -243,7 +243,7 @@ python3 scripts/osv_query.py --out .cache/scan.json
 1 finding = 1 行。既存行は絶対に書き換えない。
 
 ```json
-{"ts":"2026-08-07T09:00:00Z","run_id":"2026-08-07T09:00:00Z","osv_id":"GHSA-xxxx","cve":"CVE-2024-12345","package":"multer","ecosystem":"npm","installed_version":"1.4.4","fixed_version":"1.4.5-lts.1","direct":true,"dev":false,"cvss":7.5,"severity":"HIGH","kev":true,"usage":"used","verdict":"act","reason":"アップロードAPIで脆弱な parseForm を使用","evidence":["src/api/upload.js:42"],"config_ignored":false,"action_taken":"issue_created","issue_url":"https://github.com/o/r/issues/12"}
+{"ts":"2026-08-07T09:00:00Z","run_id":"2026-08-07T09:00:00Z","osv_id":"GHSA-xxxx","cve":"CVE-2024-12345","package":"multer","ecosystem":"npm","installed_version":"1.4.4","fixed_version":"1.4.5-lts.1","direct":true,"dev":false,"cvss":7.5,"severity":"HIGH","kev":true,"usage":"used","verdict":"act","reason":"アップロードAPIで脆弱な parseForm を使用","evidence":["src/api/upload.js:42"],"config_ignored":false,"action_taken":"issue_created","issue_url":"https://github.com/your-org/your-project/issues/12"}
 ```
 
 フィールドは固定。値が無い場合は `null` を入れ、キー自体は省略しない

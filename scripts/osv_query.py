@@ -35,7 +35,7 @@ OSV_BATCH_URL = "https://api.osv.dev/v1/querybatch"
 OSV_VULN_URL = "https://api.osv.dev/v1/vulns/"
 KEV_URL = "https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json"
 
-USER_AGENT = "quiet-cve/0.1 (+https://github.com/; OSV client)"
+USER_AGENT = "quiet-cve/0.1 (+https://github.com/high-tech-r/quiet-cve; OSV client)"
 HTTP_TIMEOUT = 30
 KEV_CACHE_TTL = 24 * 60 * 60  # 24h
 

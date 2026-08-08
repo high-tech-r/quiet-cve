@@ -105,8 +105,10 @@ ln -s ../../quiet-cve .claude/skills/quiet-cve
 マニフェストのみの場合はレンジ指定から下限バージョンを推定し、
 レポートにその旨が明記される。
 
-（`pnpm-lock.yaml` は未対応。`pnpm install --lockfile-only` 相当の
-`package-lock.json` があればそちらが使われる）
+（`pnpm-lock.yaml` は未対応。この場合 `package.json` のレンジから下限バージョンを
+推定して読む。正確なバージョンで見たいなら `npm install --package-lock-only` で
+`package-lock.json` を作れば使われるが、pnpm が実際に入れたバージョンとは
+ずれうる点に注意）
 
 ---
 
@@ -227,7 +229,7 @@ ignore:
   cves:
     - id: CVE-2024-12345
       reason: "該当機能(XMLパーサ)を使っていない。2026-01-15 に手動確認済み"
-      expires: 2026-12-31
+      expires: "2026-12-31"   # 日付は必ず引用符で囲む
 ```
 
 期限を過ぎた除外は自動的に失効し、「⚠ 除外期限切れ」としてレポートに再浮上する。
@@ -269,9 +271,9 @@ python3 scripts/rotate_reports.py --dry-run   # 何が消えるか先に確認
 ```bash
 # 判定の内訳
 jq -r .verdict logs/triage.jsonl | sort | uniq -c
-#   12 not_affected
+#    2 act
+#    4 not_affected
 #    3 watch
-#    1 act
 
 # 要対応だったものの一覧
 jq -r 'select(.verdict=="act") | "\(.cve) \(.package)@\(.installed_version)"' logs/triage.jsonl
