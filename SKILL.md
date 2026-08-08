@@ -46,10 +46,45 @@ python3 scripts/osv_query.py --detect-only
 `version_exact: false` のパッケージは、レンジ指定から下限バージョンを推定している。
 誤検知・見逃しの両方がありうるので、レポートにその旨を明記する。
 
+### Step 1b. 宣言されていない資産の棚卸し
+
+`scan.include_undeclared_assets` が false ならスキップする。
+
+Step 1 は「宣言された依存」しか見えない。ここではロックファイルに載らないもの
+—— SCA ツールの死角 —— を走査する。
+
+| 資産 | 見つけ方 | バージョンの取り出し |
+|---|---|---|
+| CDN 読み込み | HTML/テンプレート類（`.html` `.php` `.twig` `.blade.php` `.erb` `.ejs` `.jsx` `.tsx` `.vue` 等）を `<script src=` `<link href=` と CDN ドメイン（cdnjs.cloudflare.com / cdn.jsdelivr.net / unpkg.com / ajax.googleapis.com / code.jquery.com 等）で Grep | URL に含まれることが多い（`/jquery/3.4.1/`、`bootstrap@5.1.0`） |
+| 手動配置ライブラリ | `js/` `assets/` `static/` `public/` `lib/` 等のファイル名（`jquery-3.4.1.min.js`）と先頭バナーコメント（`/*! jQuery v3.4.1`） | ファイル名またはバナー |
+| フォーク・改造版 | 同上。バナーが改変・削除されていることがある | 特定できなければ「不明」のまま |
+
+規則:
+
+1. Grep とファイル先頭の確認（バナーは先頭 5 行まで）だけで済ませる。中身は深読みしない。
+   開くファイルは 50 件まで。超えたら「n 件中 m 件のみ確認」とレポートに書く。
+2. `exclude_paths` は原則尊重する。ただしこの棚卸しに限り、`vendor` 等に
+   パッケージマネージャ管理外のファイルが直接コミットされていないかの
+   **ファイル名の確認**までは行ってよい。
+3. `ecosystem:name@version` まで特定できたものは Step 2 で追加照会する。
+   検出元（`index.html:12` など）を控えておき、レポートに書く。
+4. バージョンが特定できなかった資産は、**照会せずに黙って落とすのではなく**、
+   レポートの「宣言されていない資産」表に「特定できず・手動確認を推奨」で載せる。
+   unknown を unused に丸めないのと同じ原則。
+5. Apache / nginx / OpenSSL / PHP 本体などのミドルウェア・実行環境は対象外
+   （OSV の照会エコシステムに無い）。ユーザーに聞かれたら対象外と明確に答える。
+
 ### Step 2. OSV.dev への照会
 
 ```bash
 python3 scripts/osv_query.py --out .cache/scan.json
+```
+
+Step 1b で特定できた資産があれば、追加で照会して両方の findings を対象にする:
+
+```bash
+python3 scripts/osv_query.py --packages npm:jquery@3.4.1 npm:bootstrap@4.3.1 \
+  --out .cache/scan-undeclared.json
 ```
 
 - ネットワークが使えない場合は `--offline`（キャッシュのみ）。結果が空でも
@@ -222,6 +257,17 @@ python3 scripts/osv_query.py --out .cache/scan.json
 | CVE | 理由 | 期限 |
 |---|---|---|
 | CVE-... | ... | 2026-12-31 |
+
+---
+
+## 🔍 宣言されていない資産
+
+{Step 1b で見つかった場合のみ書く。走査して何も無ければ「なし」と 1 行}
+
+| 資産 | 検出元 | バージョン | 扱い |
+|---|---|---|---|
+| jquery（CDN） | `index.html:12` | 3.4.1 | 照会済み。CVE は上の分類に含まれる |
+| slick-carousel（改造版） | `public/js/slick.custom.js:1` | 特定できず | 未照会。手動確認を推奨 |
 
 ---
 
