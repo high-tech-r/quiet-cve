@@ -16,6 +16,8 @@ Claude Code に: 「quiet-cve で CVE チェックして」
 インストールは git clone だけ。Python 3.11+ があれば追加の依存はありません（標準ライブラリのみ）。
 API キーも不要です（OSV.dev は認証不要）。
 
+[GitHub Actions で定期実行することもできます](#github-actions-で定期実行する)。
+
 ---
 
 ## 動かすとこうなります
