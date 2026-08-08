@@ -28,8 +28,21 @@ scan:
 
   # ロックファイルに載らない資産（CDN 読み込み・手動配置されたライブラリ・
   # フォーク改造版）も走査するか。検知するのは Claude（SKILL.md Step 1b）で、
-  # スクリプト単体では見ない。ミドルウェア（Apache / nginx / OpenSSL 等）は対象外。
+  # スクリプト単体では見ない。
   include_undeclared_assets: true
+
+  # ミドルウェア・実行環境の照合（NVD CPE 経由。scripts/nvd_query.py が引く）。
+  # 実行環境はリポジトリの外にあり、コードからバージョンを確実に検出できないため、
+  # ここに明示的に宣言する。空なら何もしない。
+  # 対応製品は `python3 scripts/nvd_query.py --list-products` で一覧できる。
+  # API キーは不要（NVD_API_KEY 環境変数があればレート制限が緩む。機能は同じ）。
+  middleware:
+    # - name: nginx
+    #   version: "1.18.0"
+    # - name: openssl
+    #   version: "1.1.1k"
+    # - name: php
+    #   version: "8.1.0"
 
 # ---------------------------------------------------------------------------
 # thresholds: 深刻度しきい値

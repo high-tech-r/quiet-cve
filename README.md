@@ -141,7 +141,7 @@ ln -s ../../quiet-cve .claude/skills/quiet-cve
 | Python | 3.11 以上（`tomllib` を使うため。3.8+ でもフォールバックで動く） |
 | PyYAML | 任意。無い場合は同梱の簡易 YAML パーサを使う |
 | gh CLI | GitHub Issue 起票を有効にする場合のみ |
-| ネットワーク | `api.osv.dev` と `www.cisa.gov` への HTTPS |
+| ネットワーク | `api.osv.dev` と `www.cisa.gov` への HTTPS（ミドルウェア照合を使う場合は `services.nvd.nist.gov` も） |
 
 ### 対応エコシステム
 
@@ -176,9 +176,39 @@ HTML やテンプレートの `<script src>` から CDN の URL を、配置さ�
 （実悪用あり）の CVE-2020-11023 が出てきます。ロックファイルには決して
 載らないのに、実際に攻撃されている —— この死角を埋めるための機能です。
 
-ただし対象は **OSV.dev に照会できるエコシステムのライブラリまで**です。
-Apache / nginx / OpenSSL / PHP 本体のようなミドルウェア・実行環境の CVE 照合は
-対象外です（ロードマップ参照）。
+### ミドルウェア・実行環境
+
+Apache / nginx / OpenSSL / PHP 本体のような、パッケージマネージャの外にある
+ソフトウェアも照合できます。こちらは OSV.dev ではなく **NVD の CPE 照合**
+（`scripts/nvd_query.py`）を使います。API キーは不要です
+（`NVD_API_KEY` 環境変数があればレート制限が緩みますが、無くても動きます）。
+
+実行環境はリポジトリの外にあってコードから確実に検出できないため、
+**`config.yml` に明示的に宣言する方式**です。
+
+```yaml
+scan:
+  middleware:
+    - name: nginx
+      version: "1.18.0"
+    - name: php
+      version: "8.1.0"
+```
+
+宣言が空のときは何もしませんが、Claude が Dockerfile や CI 設定からバージョンを
+読み取れた場合は、宣言の追加を提案します（勝手に config を書き換えることはしません）。
+
+実例: `php 8.1.0` を宣言すると KEV 掲載の CVE-2024-4577（PHP CGI の RCE、
+2024 年に大規模悪用）、`nginx 1.18.0` からは CVE-2023-44487（HTTP/2 Rapid Reset）が
+検出されます。どちらもロックファイルには決して現れません。
+
+対応製品は `python3 scripts/nvd_query.py --list-products` で一覧できます
+（apache-httpd / nginx / openssl / php / mysql / postgresql / redis / tomcat /
+nodejs / curl / ruby / python など。表に無い製品は CPE_TABLE に追記できます）。
+
+なお NVD には解析遅延（新しい CVE への CPE 付与の遅れ）があるため、
+0 件は「NVD 照会で該当なし」であって「脆弱性なし」の保証ではありません。
+レポートにもその前提で書かれます。
 
 ---
 
@@ -197,14 +227,15 @@ Claude が `SKILL.md` の手順に従って、次を順に実行します。
 1. 依存ファイルを検出する（`package-lock.json` などを自動で探す）
 2. ロックファイルに載らない資産も走査する（CDN 読み込み・手動配置されたライブラリ。
    バージョンを特定できたものは照会対象に加え、できなかったものもレポートに列挙する）
-3. OSV.dev に問い合わせ、CISA KEV カタログと照合する
-4. `config.yml` の `ignore` を適用する（期限切れの除外は自動で失効させる）
-5. **各 CVE についてコードを読み、脆弱な機能を実際に使っているか判定する** ← 中核
-6. 要対応 / 様子見 / 影響なし に分類する
-7. `reports/YYYY-MM-DD.md` を書く
-8. `logs/triage.jsonl` に 1 判定 1 行で追記する
-9. 条件を満たせば GitHub Issue を起票する（既定では無効）
-10. 保持期間を過ぎた古いレポートを月次サマリーに集約して削除する
+3. `config.yml` に宣言されたミドルウェア（nginx / OpenSSL / PHP 本体等）を NVD に照会する
+4. OSV.dev に問い合わせ、CISA KEV カタログと照合する
+5. `config.yml` の `ignore` を適用する（期限切れの除外は自動で失効させる）
+6. **各 CVE についてコードを読み、脆弱な機能を実際に使っているか判定する** ← 中核
+7. 要対応 / 様子見 / 影響なし に分類する
+8. `reports/YYYY-MM-DD.md` を書く
+9. `logs/triage.jsonl` に 1 判定 1 行で追記する
+10. 条件を満たせば GitHub Issue を起票する（既定では無効）
+11. 保持期間を過ぎた古いレポートを月次サマリーに集約して削除する
 
 ### いつ実行するか
 
@@ -297,6 +328,7 @@ lodash に脆弱性があっても、危ないのが `_.template` で、あな�
 |---|---|---|
 | 検知（依存とアドバイザリの照合） | ⭕ リアルタイム | ⭕ 週 1 回（同梱の CI テンプレート） |
 | **ロックファイルに載らない資産の検知**（CDN 読み込み・手動配置・フォーク改造版） | ✕ | ⭕ Claude が走査（手元実行時） |
+| **ミドルウェアの CVE 照合**（Apache / nginx / OpenSSL / PHP 本体等） | ✕ | ⭕ NVD CPE 照合（config 宣言ベース） |
 | 修正版への更新 PR を自動作成 | ⭕ | ✕ |
 | **脆弱な機能を実際に使っているかの判定** | ✕ | ⭕ Claude がコードを読んで判定 |
 | 判定の根拠（`file:line`）の記録 | ✕ | ⭕ |
@@ -526,6 +558,7 @@ print(dict(collections.Counter(r['verdict'] for r in rows)))
 | `SKILL.md` | Claude が従う手順書。トリアージの規則はここに書いてある |
 | `config.yml` | しきい値・除外・通知・保持期間。触るのは基本ここだけ |
 | `scripts/osv_query.py` | 依存検出 → OSV 照会 → KEV 照合 → JSON 出力 |
+| `scripts/nvd_query.py` | ミドルウェア（nginx / OpenSSL 等）の NVD CPE 照合 |
 | `scripts/ci_summary.py` | CI 向けの要約。判定はせず件数だけ出す |
 | `scripts/rotate_reports.py` | 期限切れレポートの月次集約と削除 |
 | `examples/` | 出力サンプルと GitHub Actions のテンプレート |
@@ -618,7 +651,8 @@ quiet-cve を使わなくても、Claude Code に「Dependabot のアラート�
 - [x] GitHub Issue 起票
 - [x] GitHub Actions での定期実行（cron）
 - [x] ロックファイルに載らない資産の棚卸し（CDN 読み込み・手動配置）
-- [ ] ミドルウェア・実行環境の照合（Apache / nginx / OpenSSL / PHP 本体。NVD CPE 対応が必要）
+- [x] ミドルウェア・実行環境の照合（Apache / nginx / OpenSSL / PHP 本体等。NVD CPE・config 宣言ベース）
+- [ ] ミドルウェアのバージョン自動検出（現状は config 宣言 + Claude による提案）
 - [ ] pnpm / Go modules / RubyGems / Cargo 対応
 - [ ] EPSS（悪用可能性スコア）の取り込み
 - [ ] 前回実行との差分レポート（新規 CVE のみ通知）

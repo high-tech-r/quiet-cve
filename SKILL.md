@@ -71,8 +71,28 @@ Step 1 は「宣言された依存」しか見えない。ここではロック�
 4. バージョンが特定できなかった資産は、**照会せずに黙って落とすのではなく**、
    レポートの「宣言されていない資産」表に「特定できず・手動確認を推奨」で載せる。
    unknown を unused に丸めないのと同じ原則。
-5. Apache / nginx / OpenSSL / PHP 本体などのミドルウェア・実行環境は対象外
-   （OSV の照会エコシステムに無い）。ユーザーに聞かれたら対象外と明確に答える。
+5. Apache / nginx / OpenSSL / PHP 本体などのミドルウェア・実行環境は
+   この棚卸しの対象外。**Step 1c で扱う。**
+
+### Step 1c. ミドルウェア・実行環境の照合（NVD CPE）
+
+`scan.middleware` に宣言があれば照会する:
+
+```bash
+python3 scripts/nvd_query.py --out .cache/scan-middleware.json
+```
+
+- findings は osv_query.py と同じスキーマで出るので、Step 3 以降で他と同様に扱う。
+- **宣言が空のとき**: Dockerfile / docker-compose.yml / CI 設定 / `.tool-versions` /
+  `.php-version` などからミドルウェアとバージョンが読み取れる場合は、
+  `scan.middleware` への宣言を**ユーザーに提案する**（config を勝手に書き換えない）。
+  読み取れなければ何もしない。
+- NVD には解析遅延（新しい CVE への CPE 付与の遅れ）がある。結果が 0 件でも
+  「脆弱性なし」と書かず、「宣言されたミドルウェアについて NVD 照会で該当なし」と書く。
+- ミドルウェアの実使用判定（Step 4）はコードの grep ではなく、**設定ファイルと用途**で
+  行う。例:「nginx の HTTP/2 の脆弱性 → `nginx.conf` に `http2` があるか」
+  「PHP CGI の脆弱性 → CGI/FastCGI 構成か、対象 OS か」。判断できなければ unknown。
+- 対応製品は `--list-products` で一覧できる。無い製品は CPE_TABLE に追記できる。
 
 ### Step 2. OSV.dev への照会
 
