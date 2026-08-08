@@ -1,0 +1,12 @@
+# OSV/KEV のキャッシュと生 JSON。コミット不要。
+.cache/
+
+# Python
+__pycache__/
+*.pyc
+
+# Claude Code のローカル設定
+.claude/settings.local.json
+
+# 作業引き継ぎメモ（ローカル専用）
+HANDOFF.md
