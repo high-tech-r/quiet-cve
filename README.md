@@ -62,11 +62,15 @@ minimist CVSS 9.8（推移的依存で CLI 引数解析コードが存在しな�
 
 ```bash
 cd your-project
-git clone https://github.com/<you>/quiet-cve.git
+git clone --depth 1 https://github.com/high-tech-r/quiet-cve.git
+rm -rf quiet-cve/.git   # 親リポジトリに .git が入れ子になるのを避ける
 ```
 
 以上。Python 3.11+ があれば追加インストールは不要（標準ライブラリのみで動く）。
 API キーも不要（OSV.dev は認証不要）。
+
+`config.yml` を自分用に書き換えて親リポジトリごとコミットするのが想定した使い方なので、
+`.git` は消してしまってよい。更新を追いたい場合は代わりに submodule にする。
 
 **Claude Code のスキルとして常時認識させたい場合**（任意）:
 
