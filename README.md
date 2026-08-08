@@ -9,11 +9,13 @@ npm / PyPI / Composer のロックファイルを読んで [OSV.dev](https://osv
 
 判定にはすべて `file:line` の根拠が付きます。
 
+インストールは git clone だけ。実行は、プロジェクトで Claude Code にこう頼むだけです。
+
 ```
-Claude Code に: 「quiet-cve で CVE チェックして」
+quiet-cve で CVE チェックして
 ```
 
-インストールは git clone だけ。Python 3.11+ があれば追加の依存はありません（標準ライブラリのみ）。
+Python 3.11+ があれば追加の依存はありません（標準ライブラリのみ）。
 API キーも不要です（OSV.dev は認証不要）。
 
 Dependabot の置き換えではありません。Dependabot が **検知** を、quiet-cve が
