@@ -16,10 +16,10 @@ Claude Code に: 「quiet-cve で CVE チェックして」
 インストールは git clone だけ。Python 3.11+ があれば追加の依存はありません（標準ライブラリのみ）。
 API キーも不要です（OSV.dev は認証不要）。
 
-[GitHub Actions で定期実行することもできます](#github-actions-で定期実行する)。
-
 Dependabot の置き換えではありません。Dependabot が **検知** を、quiet-cve が
 **取捨選択** を担当する [併用を推奨します](#dependabot-との違い)。
+Dependabot を使えない環境向けには、
+[週次スキャンの GitHub Actions テンプレート](#github-actions-で定期実行するdependabot-が使えない環境向け)も同梱しています。
 
 ---
 
@@ -263,8 +263,8 @@ quiet-cve が担当するのはこの「後」の部分です。
 2. アラートが溜まってきたら、手元で quiet-cve のトリアージを実行する
 3. 「影響なし」と判定されたものは、根拠つきの判定理由を添えて Dependabot 側で dismiss し、
    quiet-cve の `ignore` にも理由と期限を書く（期限が切れたら再浮上して再確認を促す）
-4. Dependabot を使っている場合、quiet-cve の週次 CI（後述）は検知が重複するので
-   **導入しなくても成立します**
+4. Dependabot を使っている場合、quiet-cve の週次 CI（後述）は検知が丸ごと重複するので
+   **不要です**
 
 ---
 
@@ -306,17 +306,22 @@ ignore:
 
 ---
 
-## GitHub Actions で定期実行する
+## GitHub Actions で定期実行する（Dependabot が使えない環境向け）
 
-`examples/github-actions/quiet-cve-scan.yml` を `.github/workflows/quiet-cve.yml`
-にコピーすれば、毎週の定期スキャンが回ります。Settings > Actions > General >
-Workflow permissions を **Read and write permissions** にしておいてください（Issue 起票に必要）。
+**Dependabot と併用する構成では、この定期実行は不要です。** 役割は「あなたが何も
+していない間に、依存パッケージへ新しい CVE が公表されていないか」の見張りであり、
+Dependabot alerts と丸ごと重複します。使うのは、組織のポリシーで Dependabot を
+有効にできない、通知をアラート一覧ではなく Issue 1 本に寄せたい、といった環境だけです。
 
-この定期実行の役割は「あなたが何もしていない間に、依存パッケージへ新しい CVE が
-公表されていないか」の見張りです。**Dependabot alerts を有効にしているリポジトリでは
-検知が重複するので、導入しなくても成立します**（[併用について](#dependabot-との違い)）。
-Dependabot を使わない・使えない環境（GitHub Enterprise の制約、通知をアラート一覧でなく
-Issue に一本化したい等）向けの選択肢です。
+Dependabot に対する数少ない上乗せは次の 2 つで、これだけのために入れる価値があるかは
+環境次第です。
+
+- 既知の CVE が後から **KEV（悪用実績カタログ）に載った**とき、要対応に昇格して知らせる
+- `config.yml` の `ignore` の**期限切れ**を、手元で実行しなくても Issue で督促する
+
+導入する場合は `examples/github-actions/quiet-cve-scan.yml` を
+`.github/workflows/quiet-cve.yml` にコピーしてください。Settings > Actions > General >
+Workflow permissions を **Read and write permissions** にする必要があります（Issue 起票に必要）。
 
 **CI は検知しかしません。** Claude が動かないので、このツールの中核である
 コード実使用判定が実行できないからです。ワークフローがやるのは
