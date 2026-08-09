@@ -1,13 +1,19 @@
 # quiet-cve
 
-**依存関係の CVE を「本当に対応が必要なものだけ」に絞り込む、Claude Code 用のツールです。**
+**プロジェクトが抱える CVE を「本当に対応が必要なものだけ」に絞り込む、Claude Code 用のツールです。**
 
-npm / PyPI / Composer のロックファイルを読んで [OSV.dev](https://osv.dev) に問い合わせ、
 見つかった脆弱性ひとつひとつについて **Claude があなたのコードを実際に読み**、
 「その脆弱な機能を本当に呼んでいるか」を確かめたうえで、
 **要対応 / 様子見 / 影響なし** に仕分けした Markdown のレポートを出します。
-
 判定にはすべて `file:line` の根拠が付きます。
+
+チェックの対象はロックファイルに載っている依存だけではありません。
+
+| 対象 | 検知のしかた | 照会先 |
+|---|---|---|
+| npm / PyPI / Composer の依存 | ロックファイルを自動検出 | [OSV.dev](https://osv.dev) + CISA KEV |
+| CDN 読み込み・手動配置のライブラリ | Claude がコードを走査 | OSV.dev + CISA KEV |
+| nginx / OpenSSL / PHP 本体などのミドルウェア | `config.yml` に宣言 | NVD + CISA KEV |
 
 インストールは git clone だけ。実行は、プロジェクトで Claude Code にこう頼むだけです。
 
@@ -16,7 +22,7 @@ quiet-cve で CVE チェックして
 ```
 
 Python 3.11+ があれば追加の依存はありません（標準ライブラリのみ）。
-API キーも不要です（OSV.dev は認証不要）。
+API キーも不要です（OSV.dev・NVD とも認証不要で使えます）。
 
 Dependabot の置き換えではありません。Dependabot が **検知** を、quiet-cve が
 **取捨選択** を担当する [併用を推奨します](#dependabot-との違い)。
