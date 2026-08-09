@@ -7,13 +7,17 @@
 **要対応 / 様子見 / 影響なし** に仕分けした Markdown のレポートを出します。
 判定にはすべて `file:line` の根拠が付きます。
 
-チェックの対象はロックファイルに載っている依存だけではありません。
+**Dependabot などの SCA ツールが原理的に検知できないものもチェックできます。**
+SCA が見るのは package.json のような「宣言された依存」だけですが、実際のコードベースには
+そこに載らない部品 —— CDN から読み込んでいるライブラリ、`public/js/` に手で置かれたファイル、
+サーバで動いているミドルウェア —— が必ずあります。quiet-cve はコードを走査して
+**実態ベースの部品棚卸し（いわば SBOM の実態版）** を作り、宣言に載らない部品まで照会に載せます。
 
 | 対象 | 検知のしかた | 照会先 |
 |---|---|---|
 | npm / PyPI / Composer の依存 | ロックファイルを自動検出 | [OSV.dev](https://osv.dev) + CISA KEV |
-| CDN 読み込み・手動配置のライブラリ | Claude がコードを走査 | OSV.dev + CISA KEV |
-| nginx / OpenSSL / PHP 本体などのミドルウェア | `config.yml` に宣言 | NVD + CISA KEV |
+| CDN 読み込み・手動配置のライブラリ | Claude がコードを走査（**SCA の死角**） | OSV.dev + CISA KEV |
+| nginx / OpenSSL / PHP 本体などのミドルウェア | `config.yml` に宣言（**SCA の死角**） | NVD + CISA KEV |
 
 インストールは git clone だけ。実行は、プロジェクトで Claude Code にこう頼むだけです。
 
