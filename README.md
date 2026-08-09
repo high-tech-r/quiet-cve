@@ -212,14 +212,16 @@ nginx -v 2>&1; php -v | head -1; openssl version; node -v
 python3 scripts/nvd_query.py --suggest
 ```
 
-Dockerfile の FROM、docker-compose の image、`.nvmrc` / `.tool-versions`、
-package.json の `engines`、composer.json の `require.php` を走査し、
+Dockerfile の FROM、docker-compose / `.gitlab-ci.yml` の image、`.nvmrc` / `.tool-versions`、
+package.json の `engines`、composer.json の `require.php`、
+GitHub Actions の setup-*（`php-version:` 等）を走査し、
 根拠（file:line）と「パッチ版まで分かるか」の別付きで候補を出します。
 Claude に実行させた場合も、候補の提示と宣言の提案まで —— config を勝手に書き換えることはしません。
 
 パッチ版まで分からない場合は `version: "8.1"` のように宣言すれば、
-下限（8.1.0）として照会し、レポートに「バージョン不正確・多めに出ている」と明記されます。
-見逃す方向には倒れません。
+8.1 系全体（8.1.0 以上 8.2 未満）のレンジで照会します。実環境が系内のどの
+パッチ版でも結果はその上位集合になるので、見逃す方向には倒れません
+（多めに出ている旨はレポートに明記されます）。
 
 実例: `php 8.1.0` を宣言すると KEV 掲載の CVE-2024-4577（PHP CGI の RCE、
 2024 年に大規模悪用）、`nginx 1.18.0` からは CVE-2023-44487（HTTP/2 Rapid Reset）が

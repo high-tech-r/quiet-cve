@@ -89,16 +89,18 @@ python3 scripts/nvd_query.py --out .cache/scan-middleware.json
   python3 scripts/nvd_query.py --suggest
   ```
 
-  Dockerfile の FROM / docker-compose の image / `.nvmrc` `.tool-versions` /
-  package.json の engines / composer.json の require.php を走査し、
+  Dockerfile の FROM / docker-compose・`.gitlab-ci.yml` の image /
+  `.nvmrc` `.tool-versions` / package.json の engines / composer.json の require.php /
+  GitHub Actions の setup-*（`php-version:` 等）を走査し、
   根拠（file:line）付きの候補が出る。候補があればユーザーに提示し、
   **サーバでの実測**（`nginx -v; php -v | head -1; openssl version` を本番で、
   コンテナなら `docker compose exec` で中から実行）と `scan.middleware` への宣言を促す。
   config を勝手に書き換えない。候補も無ければ何もしない。
 - コンテナのタグ（`php:8.1` 等）はパッチ版を固定しない（pull した日で変わる）。
   タグから読めた版をそのまま「実環境の版」として扱わないこと。
-- パッチ版が不明な宣言（`version: "8.1"`）は下限（8.1.0）で照会される。
-  多めに出る方向なので照会してよいが、レポートに「バージョン不正確」を明記する
+- パッチ版が不明な宣言（`version: "8.1"`）はブランチ全体（8.1.0 以上 8.2 未満）の
+  レンジで照会される。実環境が系内のどのパッチ版でも結果は上位集合になるので
+  照会してよいが、レポートに「バージョン不正確・多めに出ている」を明記する
   （`version_exact: false` と errors の `input_note` に出る）。
 - NVD には解析遅延（新しい CVE への CPE 付与の遅れ）がある。結果が 0 件でも
   「脆弱性なし」と書かず、「宣言されたミドルウェアについて NVD 照会で該当なし」と書く。

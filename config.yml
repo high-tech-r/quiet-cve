@@ -41,7 +41,7 @@ scan:
   #   nginx -v 2>&1; php -v | head -1; openssl version; node -v
   # リポジトリ内のヒント（Dockerfile 等）から候補を出すには:
   #   python3 scripts/nvd_query.py --suggest
-  # パッチ版が不明なら "8.1" のように書けば下限 (8.1.0) で照会される（多めに出る方向）。
+  # パッチ版が不明なら "8.1" のように書けば 8.1 系全体をレンジ照会する（多めに出る方向）。
   middleware:
     # - name: nginx
     #   version: "1.18.0"

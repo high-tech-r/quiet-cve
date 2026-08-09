@@ -38,8 +38,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from osv_query import (  # noqa: E402
-    HTTP_TIMEOUT, KEV_CACHE_TTL, USER_AGENT,
-    cfg_get, kev_index, load_config, load_kev, severity_label,
+    DEFAULT_EXCLUDES, HTTP_TIMEOUT, KEV_CACHE_TTL, USER_AGENT,
+    _emit, cfg_get, kev_index, load_config, load_kev, severity_label,
 )
 
 NVD_CVE_URL = "https://services.nvd.nist.gov/rest/json/cves/2.0"
@@ -102,6 +102,10 @@ VERSION_FILE_PRODUCT = {
 TOOL_VERSIONS_MAP = {"nodejs": "nodejs", "node": "nodejs",
                      "python": "python", "ruby": "ruby", "php": "php"}
 
+# GitHub Actions の setup-* が使うキー → 製品
+CI_VERSION_PRODUCT = {"php": "php", "node": "nodejs",
+                      "python": "python", "ruby": "ruby"}
+
 
 def _split_image_ref(ref: str) -> tuple[str, str]:
     """'docker.io/library/php:8.1-apache@sha256:..' -> ('php', '8.1-apache')"""
@@ -111,13 +115,48 @@ def _split_image_ref(ref: str) -> tuple[str, str]:
     return name.lower(), tag
 
 
-def _version_from_text(text: str) -> str | None:
+def _parse_version(v: str):
+    """'8.1.30' -> (['8','1','30'], True)。不正（空要素・数字以外始まり）なら None。
+
+    openssl の '1.1.1k' のような英字サフィックスは末尾要素にのみ許す。
+    """
+    v = (v or "").strip().lstrip("vV")
+    if not v:
+        return None
+    parts = v.split(".")
+    for i, p in enumerate(parts):
+        pattern = r"\d+[A-Za-z]*" if i == len(parts) - 1 else r"\d+"
+        if not re.fullmatch(pattern, p):
+            return None
+    return parts, len(parts) >= 3
+
+
+def _version_from_tag(tag: str) -> str | None:
+    """タグ/バージョン文字列の先頭からのみ抽出する。
+
+    'current-alpine3.18' の 3.18 は Alpine の版であって製品の版ではない。
+    先頭にアンカーすることで OS サフィックスの誤検出を防ぐ。
+    """
+    m = re.match(r"v?(\d+(?:\.\d+)*)", (tag or "").strip())
+    return m.group(1) if m else None
+
+
+def _version_from_range(text: str) -> str | None:
+    """'>=18.17' '^8.1' のような範囲指定から下限らしき最初の数字列を取る。"""
     m = re.search(r"\d+(?:\.\d+)*", text or "")
     return m.group(0) if m else None
 
 
+def _read_json(path: Path):
+    try:
+        return json.loads(path.read_text(encoding="utf-8", errors="replace"))
+    except (OSError, ValueError):
+        return None
+
+
 def _mk_candidate(product: str, raw: str, source: str, version: str | None) -> dict:
-    exact = bool(version) and version.count(".") >= 2
+    parsed = _parse_version(version) if version else None
+    exact = bool(parsed and parsed[1])
     if not version:
         note = "バージョン不明。サーバで実測して宣言する"
     elif not exact:
@@ -141,7 +180,7 @@ def suggest_products(project_root: Path, excludes: list, max_depth: int,
         product = IMAGE_TO_PRODUCT.get(name)
         if product:
             candidates.append(_mk_candidate(product, ref, source,
-                                            _version_from_text(tag)))
+                                            _version_from_tag(tag)))
         else:
             unsupported.append({"image": ref, "source": source})
 
@@ -153,26 +192,49 @@ def suggest_products(project_root: Path, excludes: list, max_depth: int,
             depth = 0
         if depth >= max_depth:
             dirnames[:] = []
+        # 隠しディレクトリは走査しない（.terraform / .cache 等のキャッシュ由来の
+        # 誤検出を防ぐ）。CI 設定を読むため .github だけは例外。
         dirnames[:] = [x for x in dirnames
-                       if x not in excl and (d / x).resolve() != self_dir]
+                       if x not in excl
+                       and (not x.startswith(".") or x == ".github")
+                       and (d / x).resolve() != self_dir]
         for fn in filenames:
             path = d / fn
             rel = str(path.relative_to(project_root))
             low = fn.lower()
             try:
                 if low.startswith("dockerfile"):
+                    # マルチステージビルドの別名（FROM x AS base → FROM base）と
+                    # 未展開の変数（FROM ${BASE_IMAGE}）はイメージ参照ではない
+                    stage_aliases: set[str] = set()
                     for i, line in enumerate(
                             path.read_text(encoding="utf-8", errors="replace").splitlines(), 1):
-                        m = re.match(r"\s*FROM\s+(?:--platform=\S+\s+)?(\S+)",
+                        m = re.match(r"\s*FROM\s+(?:--platform=\S+\s+)?(\S+)"
+                                     r"(?:\s+[Aa][Ss]\s+(\S+))?",
                                      line, re.IGNORECASE)
-                        if m:
-                            add_image(m.group(1), f"{rel}:{i}")
-                elif re.fullmatch(r"(docker-)?compose[^/]*\.ya?ml", low):
+                        if not m:
+                            continue
+                        ref = m.group(1)
+                        if "$" not in ref and ref.lower() not in stage_aliases:
+                            add_image(ref, f"{rel}:{i}")
+                        if m.group(2):
+                            stage_aliases.add(m.group(2).lower())
+                elif re.fullmatch(r"(docker-)?compose[^/]*\.ya?ml", low) or low == ".gitlab-ci.yml":
                     for i, line in enumerate(
                             path.read_text(encoding="utf-8", errors="replace").splitlines(), 1):
                         m = re.match(r"\s*image:\s*[\"']?([^\s\"'#]+)", line)
-                        if m:
+                        if m and "$" not in m.group(1):
                             add_image(m.group(1), f"{rel}:{i}")
+                elif low.endswith((".yml", ".yaml")) and ".github" in Path(rel).parts:
+                    # GitHub Actions の setup-*（php-version: "8.1" 等）
+                    for i, line in enumerate(
+                            path.read_text(encoding="utf-8", errors="replace").splitlines(), 1):
+                        m = re.match(r"\s*(php|node|python|ruby)-version\s*:"
+                                     r"\s*[\"']?([^\s\"'#]+)", line)
+                        if m and "$" not in m.group(2):
+                            candidates.append(_mk_candidate(
+                                CI_VERSION_PRODUCT[m.group(1)], line.strip(),
+                                f"{rel}:{i}", _version_from_tag(m.group(2))))
                 elif low == ".tool-versions":
                     for i, line in enumerate(
                             path.read_text(encoding="utf-8", errors="replace").splitlines(), 1):
@@ -180,29 +242,31 @@ def suggest_products(project_root: Path, excludes: list, max_depth: int,
                         if len(parts) >= 2 and parts[0] in TOOL_VERSIONS_MAP:
                             candidates.append(_mk_candidate(
                                 TOOL_VERSIONS_MAP[parts[0]], line.strip(),
-                                f"{rel}:{i}", _version_from_text(parts[1])))
+                                f"{rel}:{i}", _version_from_tag(parts[1])))
                 elif fn in VERSION_FILE_PRODUCT:
                     first = path.read_text(encoding="utf-8",
                                            errors="replace").strip().splitlines()
                     if first:
                         candidates.append(_mk_candidate(
                             VERSION_FILE_PRODUCT[fn], first[0].strip(),
-                            f"{rel}:1", _version_from_text(first[0])))
+                            f"{rel}:1", _version_from_tag(first[0])))
                 elif fn == "package.json":
-                    data = json.loads(path.read_text(encoding="utf-8"))
-                    node = (data.get("engines") or {}).get("node")
-                    if node:
+                    data = _read_json(path)
+                    engines = data.get("engines") if isinstance(data, dict) else None
+                    node = engines.get("node") if isinstance(engines, dict) else None
+                    if isinstance(node, str):
                         candidates.append(_mk_candidate(
                             "nodejs", f"engines.node: {node}",
-                            f"{rel} (engines.node)", _version_from_text(node)))
+                            f"{rel} (engines.node)", _version_from_range(node)))
                 elif fn == "composer.json":
-                    data = json.loads(path.read_text(encoding="utf-8"))
-                    php = (data.get("require") or {}).get("php")
-                    if php:
+                    data = _read_json(path)
+                    require = data.get("require") if isinstance(data, dict) else None
+                    php = require.get("php") if isinstance(require, dict) else None
+                    if isinstance(php, str):
                         candidates.append(_mk_candidate(
                             "php", f"require.php: {php}",
-                            f"{rel} (require.php)", _version_from_text(php)))
-            except (OSError, json.JSONDecodeError):
+                            f"{rel} (require.php)", _version_from_range(php)))
+            except (OSError, ValueError):
                 continue
 
     # 同じ (製品, バージョン) は 1 件にまとめる（検出元は最初のもの）
@@ -215,18 +279,29 @@ def suggest_products(project_root: Path, excludes: list, max_depth: int,
     return {"candidates": deduped, "unsupported_images": unsupported}
 
 
-def _norm_version(v: str) -> tuple[str, bool]:
-    """宣言されたバージョンを照会用に正規化する。
+def _norm_version(v: str) -> tuple[str, bool, str | None] | None:
+    """宣言されたバージョンを照会用に正規化する。(start, exact, end) / 不正なら None。
 
-    '8.1' のようにパッチ版が無い宣言は下限 '8.1.0' として照会する
-    （version_exact: false）。多めに報告する方向にしか倒れない。
+    パッチ版まである宣言（'8.1.30'）は exact=True、end=None（cpeName で照会）。
+    パッチ版が無い宣言（'8.1'）はブランチ全体のレンジ [8.1.0, 8.2.0) を返す。
+    下限 1 点（8.1.0）の照会ではブランチ途中のパッチで導入された CVE
+    （versionStartIncluding が 8.1.10 のようなケース）を見逃すため、
+    必ずレンジで照会する。レンジはブランチ内のどのパッチ版に対しても上位集合になる。
     """
-    v = v.strip().lstrip("v")
-    parts = v.split(".")
-    exact = len(parts) >= 3
-    while len(parts) < 3:
-        parts.append("0")
-    return ".".join(parts), exact
+    parsed = _parse_version(v)
+    if parsed is None:
+        return None
+    parts, exact = parsed
+    if exact:
+        return ".".join(parts), True, None
+    # レンジ計算には全要素が数値である必要がある（'1.1k' のような略記は不正とする）
+    if any(not p.isdigit() for p in parts):
+        return None
+    start = ".".join(parts + ["0"] * (3 - len(parts)))
+    end_parts = parts[:]
+    end_parts[-1] = str(int(end_parts[-1]) + 1)
+    end = ".".join(end_parts + ["0"] * (3 - len(end_parts)))
+    return start, False, end
 
 
 def _nvd_get(params: dict, api_key: str | None, retries: int = 4):
@@ -299,15 +374,28 @@ def _description(cve: dict) -> str:
 
 
 def query_product(name: str, version_query: str, version_raw: str,
-                  version_exact: bool, api_key: str | None,
+                  version_exact: bool, version_end: str | None, api_key: str | None,
                   cache_dir: Path, offline: bool, errors: list) -> list[dict]:
-    """1 製品を照会して findings のリストを返す。"""
+    """1 製品を照会して findings のリストを返す。
+
+    exact な版は cpeName + isVulnerable で、パッチ不明の版は
+    virtualMatchString + バージョンレンジで照会する（見逃し防止）。
+    """
     prefixes = CPE_TABLE[name]
     by_cve: dict[str, dict] = {}
 
     for prefix in prefixes:
-        cpe_name = f"{prefix}:{version_query}:*:*:*:*:*:*:*"
-        cache = cache_dir / "nvd" / f"{name}-{version_query}-{prefix.split(':')[3]}.json"
+        vendor = prefix.split(":")[3]
+        if version_exact:
+            params = {"cpeName": f"{prefix}:{version_query}:*:*:*:*:*:*:*",
+                      "isVulnerable": "", "resultsPerPage": "2000"}
+            cache = cache_dir / "nvd" / f"{name}-{version_query}-{vendor}.json"
+        else:
+            params = {"virtualMatchString": prefix,
+                      "versionStart": version_query, "versionStartType": "including",
+                      "versionEnd": version_end, "versionEndType": "excluding",
+                      "resultsPerPage": "2000"}
+            cache = cache_dir / "nvd" / f"{name}-{version_query}-range-{vendor}.json"
         data = None
         if cache.exists() and (time.time() - cache.stat().st_mtime) < KEV_CACHE_TTL:
             try:
@@ -320,8 +408,7 @@ def query_product(name: str, version_query: str, version_raw: str,
                                "error": "offline mode: NVD 未照会"})
                 continue
             try:
-                data = _nvd_get({"cpeName": cpe_name, "isVulnerable": "",
-                                 "resultsPerPage": "2000"}, api_key)
+                data = _nvd_get(params, api_key)
                 cache.parent.mkdir(parents=True, exist_ok=True)
                 cache.write_text(json.dumps(data), encoding="utf-8")
             except RuntimeError as exc:
@@ -417,7 +504,7 @@ def main() -> int:
     if args.suggest:
         root_raw = args.project_root or cfg_get(config, "scan.project_root", "..")
         project_root = (Path(args.config).resolve().parent / root_raw).resolve()
-        excludes = cfg_get(config, "exclude_paths", []) or []
+        excludes = cfg_get(config, "exclude_paths", DEFAULT_EXCLUDES) or DEFAULT_EXCLUDES
         max_depth = int(cfg_get(config, "scan.max_depth", 6) or 6)
         result = suggest_products(project_root, excludes, max_depth, self_dir=here)
         out = {
@@ -428,14 +515,7 @@ def main() -> int:
             "note": "これは宣言の候補であり、照会はしていない。正確なバージョンは"
                     "サーバでの実測（php -v / nginx -v 等）で確認して scan.middleware に宣言する",
         }
-        text = json.dumps(out, ensure_ascii=False, indent=2)
-        if args.out == "-":
-            sys.stdout.write(text + "\n")
-        else:
-            path = Path(args.out)
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(text + "\n", encoding="utf-8")
-            sys.stderr.write(f"wrote {path}\n")
+        _emit(out, args.out)
         return 0
 
     # --- 対象の決定 -------------------------------------------------------
@@ -459,13 +539,20 @@ def main() -> int:
     # --- 照会 -------------------------------------------------------------
     findings: list[dict] = []
     for name, version in products:
-        version_query, version_exact = _norm_version(version)
+        norm = _norm_version(version)
+        if norm is None:
+            errors.append({"stage": "input",
+                           "error": f"不正なバージョン表記: {name}@{version}"})
+            continue
+        version_query, version_exact, version_end = norm
         if not version_exact:
             errors.append({"stage": "input_note",
-                           "error": f"{name}@{version} はパッチ版まで不明のため"
-                                    f"下限 {version_query} で照会（多めに出る）"})
+                           "error": f"{name}@{version} はパッチ版まで不明のため "
+                                    f"{version_query} 以上 {version_end} 未満の"
+                                    f"レンジで照会（多めに出る）"})
         findings.extend(query_product(name, version_query, version, version_exact,
-                                      api_key, cache_dir, args.offline, errors))
+                                      version_end, api_key, cache_dir,
+                                      args.offline, errors))
 
     # KEV 照合（OSV 側と同じカタログ・同じキャッシュを使う）
     kevidx = {} if args.no_kev else kev_index(load_kev(cache_dir, errors, args.offline))
@@ -499,15 +586,7 @@ def main() -> int:
         # NVD は新しい CVE への CPE 付与が遅れることがある。
         "note": "0 件は「NVD 照会で該当なし」であって「脆弱性なし」の保証ではない",
     }
-    text = json.dumps(out, ensure_ascii=False, indent=2)
-    if args.out == "-":
-        sys.stdout.write(text + "\n")
-    else:
-        path = Path(args.out)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(text + "\n", encoding="utf-8")
-        sys.stderr.write(f"wrote {path} ({len(text)} bytes)\n")
-
+    _emit(out, args.out)
     return 2 if any(e.get("stage") == "nvd" for e in errors) else 0
 
 
