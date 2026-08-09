@@ -470,18 +470,42 @@ output:
   retention_days: 90     # 日次レポートの保持日数。0 で無期限保持
 ```
 
-**CVE を無視したい場合は、しきい値を下げずに `ignore` に理由と期限を書いてください。**
+**CVE を無視したい場合は、しきい値を下げずに `ignore` に理由を書いてください。**
+理由の種類は **VEX（CycloneDX）準拠の `justification`** で宣言します。
 
 ```yaml
 ignore:
   cves:
+    # 「腐る」理由 — コードが変われば無効になるので、日付の期限が必須
     - id: CVE-2024-12345
       reason: "該当機能(XMLパーサ)を使っていない。2026-01-15 に手動確認済み"
-      expires: "2026-12-31"   # 日付は必ず引用符で囲む
+      justification: vulnerable_code_not_in_execute_path
+      expires: "2026-12-31"        # 日付は必ず引用符で囲む
+      evidence_files:              # 任意: これが変わったら期限内でも再浮上
+        - src/app.js
+      verified_at_commit: "abc1234"
+
+    # 「腐らない」理由 — コードと無関係なので、永久 ignore を許可
+    - id: CVE-2023-99999
+      reason: "Windows 限定の脆弱性。デプロイ先は Linux のみ"
+      justification: platform_not_applicable
+      expires: never
 ```
 
-期限を過ぎた除外は自動的に失効し、「⚠ 除外期限切れ」としてレポートに再浮上します。
-無期限の握りつぶしを作らないための仕組みです。
+| justification | 種別 | expires |
+|---|---|---|
+| `false_positive`（誤検知・撤回） / `platform_not_applicable`（環境的に非該当） | **腐らない** | `never` 可 |
+| `vulnerable_code_not_in_execute_path` / `vulnerable_code_cannot_be_controlled_by_adversary` / `inline_mitigations_already_exist` | **腐る** | 日付必須。`never` は設定エラーで実行停止 |
+| 未指定（既存の書き方） | 従来どおり | 日付必須 |
+
+「使っていない」系の判断は、コードが変われば**無言で**無効になります。だから腐るカテゴリに
+永久 ignore は許しません。代わりに、カレンダー期限より賢い失効条件があります —
+`evidence_files` と `verified_at_commit` を書いておくと、**根拠にしたファイルが判定時点から
+変わった瞬間に、期限内でも「根拠ファイル変更あり・再確認が必要」として再浮上**します
+（git で差分を確認します。git が使えない環境では警告を出してカレンダー期限のみで動きます）。
+
+期限を過ぎた除外も従来どおり自動失効して再浮上します。期限は「依存の依存が変わった」
+のような間接的な変化を拾う安全網として、変更検知と併用されます。
 
 ---
 
@@ -655,6 +679,7 @@ print(dict(collections.Counter(r['verdict'] for r in rows)))
 | `config.yml` | しきい値・除外・通知・保持期間。触るのは基本ここだけ |
 | `scripts/osv_query.py` | 依存検出 → OSV 照会 → KEV 照合 → JSON 出力 |
 | `scripts/nvd_query.py` | ミドルウェア（nginx / OpenSSL 等）の NVD CPE 照合 |
+| `scripts/ignore_rules.py` | ignore の適用（寿命種別・根拠ファイル変更検知）。手元と CI の共通ロジック |
 | `scripts/ci_summary.py` | CI 向けの要約。判定はせず件数だけ出す |
 | `scripts/rotate_reports.py` | 期限切れレポートの月次集約と削除 |
 | `examples/` | 出力サンプルと GitHub Actions のテンプレート |
@@ -696,10 +721,14 @@ print(dict(collections.Counter(r['verdict'] for r in rows)))
 `unused` と書けるのは根拠が 2 つ以上揃ったときだけ。
 誤った安心を配るくらいなら、余分に報告するほうがいい。
 
-**3. 握りつぶしに期限を付ける**
+**3. 握りつぶしに期限を付ける — ただし理由の寿命に合わせて**
 
-`ignore` には `expires` が必須。期限が切れれば自動的に再浮上します。
-「一度無視したものが永久に見えなくなる」状態を作りません。
+無視する理由には「腐らないもの」と「腐るもの」があります。アドバイザリの撤回や
+プラットフォーム非該当はコードがどう変わっても無効にならないので、永久 ignore を
+許します。一方「該当機能を使っていない」系の判断は、コードが変われば**無言で**
+無効になる —— だからこちらには永久 ignore を絶対に許さず、日付の期限に加えて
+**根拠ファイルの変更検知**（判定時のコミットからの git diff）で失効させます。
+「一度無視したものが、根拠が崩れているのに見えないまま」という状態を作りません。
 
 **4. 決定は設定ファイルに、判断はモデルに**
 
@@ -749,6 +778,7 @@ quiet-cve を使わなくても、Claude Code に「Dependabot のアラート�
 - [x] ロックファイルに載らない資産の棚卸し（CDN 読み込み・手動配置）
 - [x] ミドルウェア・実行環境の照合（Apache / nginx / OpenSSL / PHP 本体等。NVD CPE・config 宣言ベース）
 - [x] ミドルウェアのバージョン候補の自動検出（`--suggest`。照会はあくまで宣言ベース）
+- [x] ignore の寿命種別（VEX 準拠の `justification`・`expires: never`・根拠ファイルの変更検知）
 - [ ] pnpm / Go modules / RubyGems / Cargo 対応
 - [ ] EPSS（悪用可能性スコア）の取り込み
 - [ ] 前回実行との差分レポート（新規 CVE のみ通知）

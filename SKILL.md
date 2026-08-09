@@ -140,12 +140,38 @@ python3 scripts/osv_query.py --packages npm:jquery@3.4.1 npm:bootstrap@4.3.1 \
 
 ### Step 3. 除外の適用
 
-`config.yml` の `ignore` を適用する。ただし **黙って消さない**。
+`config.yml` の `ignore` の適用は、**自分で判断せず共通モジュールに任せる**
+（CI 側と同じロジックで動くことを保証するため）:
 
-- `ignore.cves[].expires` が実行日より前なら、除外は **失効**。
-  通常のトリアージ対象に戻し、レポートに「⚠ 除外期限切れ」と明示する。
-- 有効な除外はレポート末尾の「設定により除外」に理由付きで一覧化する。
+```bash
+python3 scripts/ignore_rules.py \
+  --scan .cache/scan.json .cache/scan-undeclared.json .cache/scan-middleware.json \
+  --out .cache/triage-input.json
+```
+
+- 出力の `findings` を Step 4 以降の対象とする。
+- **exit 1 は設定エラー**（腐るカテゴリの justification に `expires: never` 等）。
+  エラーメッセージをそのまま示して config の修正を求め、**実行を止める**。
+- `resurfaced` の項目は通常のトリアージ対象に戻し、レポートで種別を区別して書く:
+  **期限切れ / 根拠ファイル変更 / justification 不正 / 期限未設定**。
+- `warnings`（git が使えない・コミットが見つからない等）はレポートの
+  「実行時の注意」に載せる。黙って落とさない。
+- 有効な除外はレポート末尾の「設定により除外」に理由付きで一覧化する
+  （`ignored_count` が件数）。
 - ログには `config_ignored: true` で記録する（後で「無視した件数」を集計するため）。
+
+**ignore の寿命種別**（config.yml のコメントにも記載あり）:
+
+| justification | 種別 | expires |
+|---|---|---|
+| `false_positive` / `platform_not_applicable` | 腐らない（コードが変わっても無効にならない） | `never` 可 |
+| `vulnerable_code_not_in_execute_path` / `vulnerable_code_cannot_be_controlled_by_adversary` / `inline_mitigations_already_exist` | 腐る（コードが変われば無言で無効になる） | 日付必須 |
+| 未指定（既存エントリ） | 従来どおり | 日付必須 |
+
+**Step 4 で `unused` と判定した CVE をユーザーが ignore に書くときは、
+腐るカテゴリの justification と、根拠にしたファイルの `evidence_files` +
+現在のコミット（`git rev-parse --short HEAD`）の `verified_at_commit` を
+添えることを提案する。** これでカレンダー期限より早く「根拠が変わった」を検知できる。
 
 ### Step 4. コード実使用状況の判定 ★ここが本フレームワークの中核
 
@@ -289,9 +315,19 @@ python3 scripts/osv_query.py --packages npm:jquery@3.4.1 npm:bootstrap@4.3.1 \
 
 ## ⚫ 設定により除外
 
-| CVE | 理由 | 期限 |
-|---|---|---|
-| CVE-... | ... | 2026-12-31 |
+| CVE | 理由 | justification | 期限 |
+|---|---|---|---|
+| CVE-... | ... | vulnerable_code_not_in_execute_path | 2026-12-31 |
+| CVE-... | Windows 限定 | platform_not_applicable | 無期限 |
+
+{ignore_rules.py の resurfaced に項目があれば、ここに種別付きで再浮上を書く}
+
+### ⏰ 除外の再浮上
+
+| CVE | 種別 | 内容 | 当時の理由 |
+|---|---|---|---|
+| CVE-... | 根拠ファイル変更 | src/app.js に abc1234 以降の変更あり・再確認が必要 | 該当機能未使用 |
+| CVE-... | 期限切れ | 2026-01-31 に失効 | ... |
 
 ---
 

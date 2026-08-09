@@ -37,6 +37,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          # ignore の根拠ファイル変更検知（verified_at_commit との git diff）に履歴が要る
+          fetch-depth: 0
 
       - uses: actions/setup-python@v7
         with:

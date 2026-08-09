@@ -62,3 +62,39 @@ CVSS 9.8 が 2 件、**要対応**。
 
 `unknown` を `unused` に丸めないことが、このフレームワークの設計上いちばん重要な制約。
 詳しくは [SKILL.md](../SKILL.md) の Step 4 を参照。
+
+## ignore の寿命種別の動作確認パターン
+
+`ignore_rules.py` の検証には、fixture-app を git リポジトリにして（`git init` + 全ファイルを
+1 コミット）、config に次の 3 パターンを書いて確認する。
+
+```yaml
+ignore:
+  cves:
+    # ① 腐らない ignore — 永久に抑制される（何度実行しても再浮上しない）
+    - id: CVE-XXXX-0001
+      reason: "Windows 限定の脆弱性。デプロイ先は Linux のみ"
+      justification: platform_not_applicable
+      expires: never
+
+    # ② 腐る ignore — 期限内 & 根拠ファイル無変更なら抑制される
+    - id: CVE-XXXX-0002
+      reason: "該当機能未使用"
+      justification: vulnerable_code_not_in_execute_path
+      expires: "2099-12-31"
+      evidence_files:
+        - src/app.js
+      verified_at_commit: "<git rev-parse --short HEAD の値>"
+
+    # ③ ②と同じ形で evidence_files に backend/ を指定
+```
+
+確認手順:
+
+1. そのまま実行 → ①②③ すべて「設定により除外」に入る（再浮上 0 件）
+2. `backend/loader.py` に 1 行追記（コミット不要。作業ツリーの変更も拾う）
+   → ③ だけが**期限内なのに**「根拠ファイル変更・再確認が必要」で再浮上する
+3. ② の `justification` を残したまま `expires: never` に変える
+   → **設定エラーで実行が停止**する（exit 1。修正例つきのメッセージが出る）
+4. おまけ: `justification` を `not_a_real_value` に変える → 「justification 不正」で再浮上、
+   `verified_at_commit` をでたらめにする → 警告つきでカレンダー期限のみの動作に落ちる

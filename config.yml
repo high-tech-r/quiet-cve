@@ -77,12 +77,36 @@ thresholds:
 # ignore: 意図的に無視するもの（必ず理由と期限を書く）
 # ---------------------------------------------------------------------------
 ignore:
+  # 無視する理由には「腐らないもの」と「腐るもの」がある。justification（VEX/CycloneDX
+  # 準拠の語彙）で種別を宣言すると、期限の扱いが変わる。
+  #
+  #   腐らない理由（expires: never = 永久 ignore を許可）:
+  #     false_positive            … アドバイザリ撤回・誤検知
+  #     platform_not_applicable   … 実行環境的に該当しない（Windows 限定で Linux 運用等）
+  #   腐る理由（expires: never は設定エラーで実行停止。日付が必須）:
+  #     vulnerable_code_not_in_execute_path
+  #     vulnerable_code_cannot_be_controlled_by_adversary
+  #     inline_mitigations_already_exist
+  #
+  # 「使っていない」系の判断はコードが変われば無言で無効になるため、永久 ignore を許さない。
+  # 腐る理由には evidence_files + verified_at_commit を書くと、根拠ファイルが判定時点から
+  # 変わったとき期限内でも再浮上する（カレンダー期限は安全網として併用される）。
+  #
+  # justification 未指定の既存エントリは従来どおり「日付の期限が必須・never 不可」。
   # 日付は必ず引用符付きで書く（"2026-12-31"）。
-  # 期限切れ(expires < 実行日)の項目は無視されず、レポートに「除外期限切れ」として再浮上する。
   cves:
     # - id: CVE-2024-12345
     #   reason: "該当機能(XMLパーサ)を使っていない。2026-01-15 に手動確認済み"
+    #   justification: vulnerable_code_not_in_execute_path
     #   expires: "2026-12-31"
+    #   evidence_files:            # 任意: これが変わったら期限内でも再浮上
+    #     - src/app.js
+    #     - src/parser/
+    #   verified_at_commit: "abc1234"   # 判定した時点のコミット
+    # - id: CVE-2023-99999
+    #   reason: "Windows 限定の脆弱性。デプロイ先は Linux のみ"
+    #   justification: platform_not_applicable
+    #   expires: never
 
   # パッケージ単位の除外。ecosystem は npm | PyPI | Packagist
   packages:

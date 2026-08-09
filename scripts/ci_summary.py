@@ -20,9 +20,9 @@ CI 上では Claude が動かないため、SKILL.md Step 4（コード実使用
 severity_label() と同じ境界（CRITICAL/HIGH = 7.0 以上, MEDIUM = 4.0 以上）で
 ラベルを下限スコアとみなす。推定を上振れさせる方向なので、見逃しは増えない。
 
-Step 3 の ignore 適用もここで行う。osv_query.py は ignore を知らないため、
-これをやらないと握りつぶしたはずの CVE が CI 側で再浮上する。
-`expires` 切れの項目は無視されず「除外期限切れ」として報告に載る。
+Step 3 の ignore 適用は共通モジュール ignore_rules.py で行う（手元トリアージと
+同じロジック）。期限切れ・根拠ファイル変更・justification 不正の項目は
+抑制されず、種別付きで報告に再浮上する。
 
 使い方:
     python3 scripts/ci_summary.py --scan scan.json --out summary.json --markdown body.md
@@ -33,11 +33,14 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from datetime import date, datetime, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from osv_query import _norm_pkg, cfg_get, load_config  # noqa: E402
+from osv_query import cfg_get, load_config  # noqa: E402
+from ignore_rules import (  # noqa: E402
+    RESURFACE_LABEL, IgnoreConfigError, apply_ignores, validate_rules,
+)
 
 # advisory_label しか無い場合に、ラベルを下限スコアとして読み替える表。
 # severity_label() の境界と同じ値にしてある（片方だけ動かさないこと）。
@@ -48,90 +51,6 @@ BUCKET_LABEL = {
     "watch": "🟡 要トリアージ",
     "untriaged": "⚪ 未判定",
 }
-
-
-# ---------------------------------------------------------------------------
-# ignore（SKILL.md Step 3）
-# ---------------------------------------------------------------------------
-
-def _parse_expires(value) -> date | None:
-    if isinstance(value, date):
-        return value
-    if not value:
-        return None
-    try:
-        return datetime.strptime(str(value).strip(), "%Y-%m-%d").date()
-    except ValueError:
-        return None
-
-
-def _finding_ids(finding: dict) -> set[str]:
-    ids = set(finding.get("cve_ids") or [])
-    ids.add(finding.get("osv_id") or "")
-    ids.update(finding.get("aliases") or [])
-    return {i for i in ids if i}
-
-
-def apply_ignores(findings: list[dict], config: dict, today: date):
-    """(残った findings, 無視した件数, 期限切れルール) を返す。"""
-    cve_rules = cfg_get(config, "ignore.cves", []) or []
-    pkg_rules = cfg_get(config, "ignore.packages", []) or []
-
-    expired: list[dict] = []
-    kept: list[dict] = []
-    ignored = 0
-
-    for finding in findings:
-        ids = _finding_ids(finding)
-        pkg = finding.get("package") or {}
-        eco = pkg.get("ecosystem") or ""
-        norm_name = _norm_pkg(eco, pkg.get("name") or "")
-
-        matched = None
-        for rule in cve_rules:
-            if isinstance(rule, dict) and str(rule.get("id") or "") in ids:
-                matched = rule
-                break
-        if matched is None:
-            for rule in pkg_rules:
-                if not isinstance(rule, dict):
-                    continue
-                if str(rule.get("ecosystem") or "") != eco:
-                    continue
-                if _norm_pkg(eco, str(rule.get("name") or "")) == norm_name:
-                    matched = rule
-                    break
-
-        if matched is None:
-            kept.append(finding)
-            continue
-
-        expires = _parse_expires(matched.get("expires"))
-        # expires が無い / 読めない ignore は無効。無期限の握りつぶしを作らない。
-        if expires is None or expires < today:
-            note = "expires 未設定または不正" if expires is None else f"{expires} に失効"
-            finding = dict(finding)
-            finding["ignore_expired"] = {
-                "reason": matched.get("reason") or "",
-                "note": note,
-            }
-            expired.append({
-                "rule": matched.get("id") or matched.get("name"),
-                "note": note,
-                "reason": matched.get("reason") or "",
-            })
-            kept.append(finding)
-        else:
-            ignored += 1
-
-    # 同じルールが複数 finding に当たっても、期限切れ通知は 1 回で足りる
-    seen, unique_expired = set(), []
-    for e in expired:
-        if e["rule"] not in seen:
-            seen.add(e["rule"])
-            unique_expired.append(e)
-
-    return kept, ignored, unique_expired
 
 
 # ---------------------------------------------------------------------------
@@ -234,13 +153,20 @@ def build_markdown(result: dict, scan: dict, repo_slug: str | None) -> str:
     lines.append(target)
     lines.append("")
 
-    if result["expired_ignores"]:
-        lines.append("### ⏰ 除外期限切れ")
+    if result["resurfaced"]:
+        lines.append("### ⏰ 除外の再浮上")
         lines.append("")
-        lines.append("`config.yml` の ignore が失効し、再浮上しました。延長するか対応するか決めてください。")
+        lines.append("`config.yml` の ignore が効力を失い、再浮上しました。再確認するか、宣言を直してください。")
         lines.append("")
-        for e in result["expired_ignores"]:
-            lines.append(f"- `{e['rule']}` — {e['note']}（当時の理由: {e['reason'] or '記載なし'}）")
+        for e in result["resurfaced"]:
+            label = RESURFACE_LABEL.get(e.get("kind"), e.get("kind"))
+            lines.append(f"- `{e['rule']}`【{label}】 {e['note']}（当時の理由: {e['reason'] or '記載なし'}）")
+        lines.append("")
+    if result.get("ignore_warnings"):
+        lines.append("### ⚠ ignore 適用時の警告")
+        lines.append("")
+        for w in result["ignore_warnings"]:
+            lines.append(f"- `{w.get('rule', '?')}` — {w.get('error')}")
         lines.append("")
 
     for bucket in ("act", "watch"):
@@ -307,6 +233,11 @@ def main() -> int:
 
     scans = [json.loads(Path(p).read_text(encoding="utf-8")) for p in args.scan]
     config = load_config(Path(args.config))
+    try:
+        validate_rules(config)
+    except IgnoreConfigError as exc:
+        sys.stderr.write(str(exc) + "\n")
+        return 1
     today = (
         datetime.strptime(args.today, "%Y-%m-%d").date()
         if args.today else datetime.now(timezone.utc).date()
@@ -324,13 +255,21 @@ def main() -> int:
     }
     all_findings = [f for s in scans for f in (s.get("findings") or [])]
 
-    findings, ignored, expired = apply_ignores(all_findings, config, today)
+    # 根拠ファイルの変更検知に使う git 実行場所（scan 結果が知っている）
+    project_root = next(
+        (Path(s["project_root"]) for s in scans if s.get("project_root")), None)
+
+    ignore_warnings: list = []
+    findings, ignored, resurfaced = apply_ignores(
+        all_findings, config, today,
+        project_root=project_root, warnings=ignore_warnings)
 
     classified = []
     for finding in findings:
         bucket, reason = classify(finding, config)
-        if finding.get("ignore_expired"):
-            reason = f"{reason} / 除外期限切れ"
+        res = finding.get("ignore_resurfaced")
+        if res:
+            reason = f"{reason} / {RESURFACE_LABEL.get(res.get('kind'), '再浮上')}"
         classified.append({"bucket": bucket, "reason": reason, "finding": finding})
 
     counts = {
@@ -358,9 +297,10 @@ def main() -> int:
             "assignees": [str(a) for a in (cfg_get(config, "notify.github_issue.assignees", []) or [])],
         },
         "counts": counts,
-        "needs_triage": counts["act"] + counts["watch"] > 0 or bool(expired),
+        "needs_triage": counts["act"] + counts["watch"] > 0 or bool(resurfaced),
         "scan_errors": scan_errors,
-        "expired_ignores": expired,
+        "resurfaced": resurfaced,
+        "ignore_warnings": ignore_warnings,
         "findings": classified,
     }
 
