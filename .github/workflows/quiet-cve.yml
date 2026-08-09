@@ -59,12 +59,22 @@ jobs:
           # code=2 は「通信に失敗した」の意味。結果が空でも安全ではない。
           # ここでは落とさず、artifact を残してから最後のステップで落とす。
 
+      - name: ミドルウェアを NVD に照会
+        id: nvd
+        run: |
+          # config.yml の scan.middleware に宣言されたものだけ引く（空なら 0 件で正常終了）。
+          # 宣言ベースの決定的スクリプトなので Claude なしで回せる。
+          # ここは Dependabot に見えない範囲であり、この見張りが週次 CI の主な存在意義。
+          ncode=0
+          python3 scripts/nvd_query.py --out scan-middleware.json || ncode=$?
+          echo "code=$ncode" >> "$GITHUB_OUTPUT"
+
       - name: 要約（ignore 適用・分類）
         id: summary
-        if: steps.scan.outputs.code != '2'
+        if: steps.scan.outputs.code != '2' && steps.nvd.outputs.code != '2'
         run: |
           python3 scripts/ci_summary.py \
-            --scan scan.json \
+            --scan scan.json scan-middleware.json \
             --out summary.json \
             --markdown issue-body.md \
             --repo "$GITHUB_REPOSITORY"
@@ -87,16 +97,17 @@ jobs:
           name: quiet-cve-scan
           path: |
             scan.json
+            scan-middleware.json
             summary.json
           if-no-files-found: warn
           retention-days: 30
 
       - name: ジョブサマリーに出す
-        if: steps.scan.outputs.code != '2'
+        if: steps.scan.outputs.code != '2' && steps.nvd.outputs.code != '2'
         run: cat issue-body.md >> "$GITHUB_STEP_SUMMARY"
 
       - name: Issue を起票 / 更新
-        if: steps.scan.outputs.code != '2' && steps.summary.outputs.needs_triage == 'true'
+        if: steps.scan.outputs.code != '2' && steps.nvd.outputs.code != '2' && steps.summary.outputs.needs_triage == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           LABELS: ${{ steps.summary.outputs.labels }}
@@ -141,7 +152,7 @@ jobs:
           fi
 
       - name: 通信失敗なら落とす
-        if: steps.scan.outputs.code == '2'
+        if: steps.scan.outputs.code == '2' || steps.nvd.outputs.code == '2'
         run: |
-          echo "::error::OSV.dev / KEV への照会に失敗しました。検出 0 件は「脆弱性なし」を意味しません。"
+          echo "::error::OSV.dev / KEV / NVD への照会に失敗しました。検出 0 件は「脆弱性なし」を意味しません。"
           exit 1

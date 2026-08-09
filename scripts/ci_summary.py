@@ -223,11 +223,15 @@ def build_markdown(result: dict, scan: dict, repo_slug: str | None) -> str:
     lines.append(f"| {BUCKET_LABEL['untriaged']} | {counts['untriaged']} |")
     lines.append(f"| ⚫ ignore で除外 | {counts['ignored']} |")
     lines.append("")
-    lines.append(
+    target = (
         f"スキャン対象: {scan.get('packages_scanned', 0)} パッケージ / "
-        f"マニフェスト {len(scan.get('manifests') or [])} 件 / "
-        f"KEV カタログ {(scan.get('kev_catalog') or {}).get('entries', 0)} 件"
+        f"マニフェスト {len(scan.get('manifests') or [])} 件"
     )
+    middleware = scan.get("middleware_products") or []
+    if middleware:
+        target += f" / ミドルウェア {len(middleware)} 件（{', '.join(middleware[:5])}）"
+    target += f" / KEV カタログ {(scan.get('kev_catalog') or {}).get('entries', 0)} 件"
+    lines.append(target)
     lines.append("")
 
     if result["expired_ignores"]:
@@ -292,7 +296,8 @@ def build_markdown(result: dict, scan: dict, repo_slug: str | None) -> str:
 def main() -> int:
     here = Path(__file__).resolve().parent.parent
     ap = argparse.ArgumentParser(description="osv_query.py の結果を CI 向けに要約する")
-    ap.add_argument("--scan", required=True, help="osv_query.py --out で書いた JSON")
+    ap.add_argument("--scan", required=True, nargs="+",
+                    help="osv_query.py / nvd_query.py --out で書いた JSON（複数可。findings を統合する）")
     ap.add_argument("--config", default=str(here / "config.yml"))
     ap.add_argument("--out", default="-", help="要約 JSON の出力先")
     ap.add_argument("--markdown", default=None, help="Issue 本文用 Markdown の出力先")
@@ -300,16 +305,26 @@ def main() -> int:
     ap.add_argument("--today", default=None, help="ignore の期限判定に使う日付（テスト用）")
     args = ap.parse_args()
 
-    scan = json.loads(Path(args.scan).read_text(encoding="utf-8"))
+    scans = [json.loads(Path(p).read_text(encoding="utf-8")) for p in args.scan]
     config = load_config(Path(args.config))
     today = (
         datetime.strptime(args.today, "%Y-%m-%d").date()
         if args.today else datetime.now(timezone.utc).date()
     )
 
-    findings, ignored, expired = apply_ignores(
-        list(scan.get("findings") or []), config, today
-    )
+    # 複数スキャン（osv_query + nvd_query）の統合。findings スキーマは共通。
+    scan = {
+        "packages_scanned": sum(int(s.get("packages_scanned") or 0) for s in scans),
+        "manifests": [m for s in scans for m in (s.get("manifests") or [])],
+        "middleware_products": [p for s in scans for p in (s.get("products") or [])],
+        "kev_catalog": {"entries": max(
+            (int((s.get("kev_catalog") or {}).get("entries") or 0) for s in scans),
+            default=0)},
+        "errors": [e for s in scans for e in (s.get("errors") or [])],
+    }
+    all_findings = [f for s in scans for f in (s.get("findings") or [])]
+
+    findings, ignored, expired = apply_ignores(all_findings, config, today)
 
     classified = []
     for finding in findings:
@@ -326,7 +341,7 @@ def main() -> int:
     }
     # 通信に失敗した実行を「0 件 = 安全」と誤読させない
     scan_errors = [e for e in (scan.get("errors") or [])
-                   if e.get("stage") in ("querybatch", "osv", "kev")]
+                   if e.get("stage") in ("querybatch", "osv", "kev", "nvd")]
 
     # Issue の体裁は config.yml に従う（ワークフロー側に値を散らさない）。
     # ただし dedupe 用の `quiet-cve` ラベルだけは仕組み上必須なので常に付ける。
