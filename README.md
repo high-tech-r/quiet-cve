@@ -179,12 +179,21 @@ HTML やテンプレートの `<script src>` から CDN の URL を、配置さ�
 ### ミドルウェア・実行環境
 
 Apache / nginx / OpenSSL / PHP 本体のような、パッケージマネージャの外にある
-ソフトウェアも照合できます。こちらは OSV.dev ではなく **NVD の CPE 照合**
-（`scripts/nvd_query.py`）を使います。API キーは不要です
-（`NVD_API_KEY` 環境変数があればレート制限が緩みますが、無くても動きます）。
+ソフトウェアの CVE も照合できます（データソースは NVD。API キー不要）。
 
-実行環境はリポジトリの外にあってコードから確実に検出できないため、
-**`config.yml` に明示的に宣言する方式**です。
+たとえば `php 8.1.0` からは **CVE-2024-4577**（PHP CGI の RCE。KEV 掲載 =
+2024 年に実際に大規模悪用）、`nginx 1.18.0` からは **CVE-2023-44487**
+（HTTP/2 Rapid Reset）が出ます。どちらもロックファイルには決して現れません。
+
+#### 使い方は 2 ステップ
+
+**Step 1. サーバで実際のバージョンを調べる**（コンテナなら `docker compose exec` で中から）
+
+```bash
+nginx -v 2>&1; php -v | head -1; openssl version; node -v
+```
+
+**Step 2. 出た番号を `config.yml` に書き写す**
 
 ```yaml
 scan:
@@ -192,48 +201,47 @@ scan:
     - name: nginx
       version: "1.18.0"
     - name: php
-      version: "8.1.0"
+      version: "8.1.30"
 ```
 
-**正確なバージョンはサーバでの実測が唯一確実です**（コンテナなら
-`docker compose exec` で中に入って実行）。出た番号をそのまま宣言に書き写してください。
+以上です。あとは通常のトリアージ実行にミドルウェアの CVE も含まれるようになります。
 
-```bash
-nginx -v 2>&1; php -v | head -1; openssl version; node -v
-```
+なぜサーバで調べるのか: **本当のバージョンはサーバの中にしか無い**からです。
+Dockerfile の `php:8.1` のようなタグはパッチ版を固定しません。CI が毎デプロイで
+ビルドしていれば pull のたびに中身が進み、長く再ビルドしていなければ古いまま ——
+どちらもリポジトリからは見えないので、quiet-cve は宣言されたものだけを信じます。
 
-コンテナの `php:8.1` のようなタグはあてになりません。タグはビルド/pull した瞬間の
-パッチ版に固定され、CI が毎デプロイでビルドしていれば知らないうちに進み、
-逆に長く再ビルドしていなければ古いまま —— どちらもタグ表記からは分かりません。
+#### サーバをすぐ確認できないとき
 
-リポジトリ内のヒントから宣言の候補を出すこともできます（照会はしません）:
+助けが 2 つあります。
+
+**その 1: 候補を自動で集める**
 
 ```bash
 python3 scripts/nvd_query.py --suggest
 ```
 
-Dockerfile の FROM、docker-compose / `.gitlab-ci.yml` の image、`.nvmrc` / `.tool-versions`、
-package.json の `engines`、composer.json の `require.php`、
-GitHub Actions の setup-*（`php-version:` 等）を走査し、
-根拠（file:line）と「パッチ版まで分かるか」の別付きで候補を出します。
-Claude に実行させた場合も、候補の提示と宣言の提案まで —— config を勝手に書き換えることはしません。
+リポジトリ内のヒント（Dockerfile の FROM、docker-compose / `.gitlab-ci.yml` の
+image、`.nvmrc` / `.tool-versions`、package.json の `engines`、composer.json の
+`require.php`、GitHub Actions の `php-version:` 等）を走査して、
+「php 8.1 系を使っているようです（根拠: Dockerfile:2）」という形の宣言候補を出します。
+出すのは候補まで。照会はせず、config を勝手に書き換えることもしません。
 
-パッチ版まで分からない場合は `version: "8.1"` のように宣言すれば、
-8.1 系全体（8.1.0 以上 8.2 未満）のレンジで照会します。実環境が系内のどの
-パッチ版でも結果はその上位集合になるので、見逃す方向には倒れません
-（多めに出ている旨はレポートに明記されます）。
+**その 2: 大まかな番号のまま宣言する**
 
-実例: `php 8.1.0` を宣言すると KEV 掲載の CVE-2024-4577（PHP CGI の RCE、
-2024 年に大規模悪用）、`nginx 1.18.0` からは CVE-2023-44487（HTTP/2 Rapid Reset）が
-検出されます。どちらもロックファイルには決して現れません。
+パッチ版まで分からなければ `version: "8.1"` と書いてください。8.1 系全体
+（8.1.0 以上 8.2 未満）をまとめて照会するので、実際のパッチ版が系内のどれでも
+該当 CVE は漏れなく含まれます。そのぶん結果は多めに出ますが、
+多めに出ている旨はレポートに明記されます。
 
-対応製品は `python3 scripts/nvd_query.py --list-products` で一覧できます
-（apache-httpd / nginx / openssl / php / mysql / postgresql / redis / tomcat /
-nodejs / curl / ruby / python など。表に無い製品は CPE_TABLE に追記できます）。
+#### 補足
 
-なお NVD には解析遅延（新しい CVE への CPE 付与の遅れ）があるため、
-0 件は「NVD 照会で該当なし」であって「脆弱性なし」の保証ではありません。
-レポートにもその前提で書かれます。
+- 対応製品は `python3 scripts/nvd_query.py --list-products` で一覧できます
+  （apache-httpd / nginx / openssl / php / mysql / postgresql / redis / tomcat /
+  nodejs / curl / ruby / python など。表に無い製品は `CPE_TABLE` に追記できます）
+- NVD 側の解析には遅れがあるため、**0 件は「NVD 照会で該当なし」であって
+  「脆弱性なし」の保証ではありません**。レポートもその前提で書かれます
+- `NVD_API_KEY` 環境変数を設定するとレート制限が緩みます（無くても動きます）
 
 ---
 
