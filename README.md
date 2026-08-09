@@ -195,8 +195,31 @@ scan:
       version: "8.1.0"
 ```
 
-宣言が空のときは何もしませんが、Claude が Dockerfile や CI 設定からバージョンを
-読み取れた場合は、宣言の追加を提案します（勝手に config を書き換えることはしません）。
+**正確なバージョンはサーバでの実測が唯一確実です**（コンテナなら
+`docker compose exec` で中に入って実行）。出た番号をそのまま宣言に書き写してください。
+
+```bash
+nginx -v 2>&1; php -v | head -1; openssl version; node -v
+```
+
+コンテナの `php:8.1` のようなタグはあてになりません。タグはビルド/pull した瞬間の
+パッチ版に固定され、CI が毎デプロイでビルドしていれば知らないうちに進み、
+逆に長く再ビルドしていなければ古いまま —— どちらもタグ表記からは分かりません。
+
+リポジトリ内のヒントから宣言の候補を出すこともできます（照会はしません）:
+
+```bash
+python3 scripts/nvd_query.py --suggest
+```
+
+Dockerfile の FROM、docker-compose の image、`.nvmrc` / `.tool-versions`、
+package.json の `engines`、composer.json の `require.php` を走査し、
+根拠（file:line）と「パッチ版まで分かるか」の別付きで候補を出します。
+Claude に実行させた場合も、候補の提示と宣言の提案まで —— config を勝手に書き換えることはしません。
+
+パッチ版まで分からない場合は `version: "8.1"` のように宣言すれば、
+下限（8.1.0）として照会し、レポートに「バージョン不正確・多めに出ている」と明記されます。
+見逃す方向には倒れません。
 
 実例: `php 8.1.0` を宣言すると KEV 掲載の CVE-2024-4577（PHP CGI の RCE、
 2024 年に大規模悪用）、`nginx 1.18.0` からは CVE-2023-44487（HTTP/2 Rapid Reset）が
@@ -652,7 +675,7 @@ quiet-cve を使わなくても、Claude Code に「Dependabot のアラート�
 - [x] GitHub Actions での定期実行（cron）
 - [x] ロックファイルに載らない資産の棚卸し（CDN 読み込み・手動配置）
 - [x] ミドルウェア・実行環境の照合（Apache / nginx / OpenSSL / PHP 本体等。NVD CPE・config 宣言ベース）
-- [ ] ミドルウェアのバージョン自動検出（現状は config 宣言 + Claude による提案）
+- [x] ミドルウェアのバージョン候補の自動検出（`--suggest`。照会はあくまで宣言ベース）
 - [ ] pnpm / Go modules / RubyGems / Cargo 対応
 - [ ] EPSS（悪用可能性スコア）の取り込み
 - [ ] 前回実行との差分レポート（新規 CVE のみ通知）

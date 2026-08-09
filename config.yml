@@ -36,6 +36,12 @@ scan:
   # ここに明示的に宣言する。空なら何もしない。
   # 対応製品は `python3 scripts/nvd_query.py --list-products` で一覧できる。
   # API キーは不要（NVD_API_KEY 環境変数があればレート制限が緩む。機能は同じ）。
+  #
+  # 正確なバージョンはサーバでの実測が唯一確実（コンテナなら docker compose exec で中から）:
+  #   nginx -v 2>&1; php -v | head -1; openssl version; node -v
+  # リポジトリ内のヒント（Dockerfile 等）から候補を出すには:
+  #   python3 scripts/nvd_query.py --suggest
+  # パッチ版が不明なら "8.1" のように書けば下限 (8.1.0) で照会される（多めに出る方向）。
   middleware:
     # - name: nginx
     #   version: "1.18.0"

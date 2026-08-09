@@ -27,6 +27,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 import time
 import urllib.error
@@ -73,6 +74,159 @@ ALIASES = {
     "node": "nodejs",
     "node.js": "nodejs",
 }
+
+
+# ===========================================================================
+# バージョン候補の自動検出（--suggest）
+#
+# リポジトリの中のヒント（Dockerfile 等）から宣言の「候補」を出す。
+# ここで出るのはあくまで候補であり、照会はしない。理由:
+#   - `php:8.1` のようなタグはパッチ版を固定しない（pull した日によって違う）
+#   - 本番がコンテナですらない場合、リポジトリには何のヒントも無い
+# 正確なバージョンはサーバでの実測（php -v 等）でしか分からない。
+# ===========================================================================
+
+IMAGE_TO_PRODUCT = {
+    "php": "php", "nginx": "nginx", "node": "nodejs", "python": "python",
+    "ruby": "ruby", "httpd": "apache-httpd", "mysql": "mysql",
+    "mariadb": "mariadb", "postgres": "postgresql", "redis": "redis",
+    "memcached": "memcached", "tomcat": "tomcat", "haproxy": "haproxy",
+}
+
+VERSION_FILE_PRODUCT = {
+    ".nvmrc": "nodejs", ".node-version": "nodejs",
+    ".python-version": "python", ".ruby-version": "ruby",
+    ".php-version": "php",
+}
+
+TOOL_VERSIONS_MAP = {"nodejs": "nodejs", "node": "nodejs",
+                     "python": "python", "ruby": "ruby", "php": "php"}
+
+
+def _split_image_ref(ref: str) -> tuple[str, str]:
+    """'docker.io/library/php:8.1-apache@sha256:..' -> ('php', '8.1-apache')"""
+    ref = ref.split("@")[0]
+    tail = ref.split("/")[-1]
+    name, _, tag = tail.partition(":")
+    return name.lower(), tag
+
+
+def _version_from_text(text: str) -> str | None:
+    m = re.search(r"\d+(?:\.\d+)*", text or "")
+    return m.group(0) if m else None
+
+
+def _mk_candidate(product: str, raw: str, source: str, version: str | None) -> dict:
+    exact = bool(version) and version.count(".") >= 2
+    if not version:
+        note = "バージョン不明。サーバで実測して宣言する"
+    elif not exact:
+        note = "パッチ版まで不明。サーバでの実測を推奨（このまま宣言すると下限で照会）"
+    else:
+        note = "タグ/範囲由来。実環境と一致するかはサーバで確認を推奨"
+    return {"name": product, "version": version, "version_exact": exact,
+            "raw": raw, "source": source, "note": note}
+
+
+def suggest_products(project_root: Path, excludes: list, max_depth: int,
+                     self_dir: Path) -> dict:
+    candidates: list[dict] = []
+    unsupported: list[dict] = []
+    excl = set(excludes or [])
+
+    def add_image(ref: str, source: str):
+        name, tag = _split_image_ref(ref)
+        if name == "scratch":
+            return
+        product = IMAGE_TO_PRODUCT.get(name)
+        if product:
+            candidates.append(_mk_candidate(product, ref, source,
+                                            _version_from_text(tag)))
+        else:
+            unsupported.append({"image": ref, "source": source})
+
+    for dirpath, dirnames, filenames in os.walk(project_root):
+        d = Path(dirpath)
+        try:
+            depth = len(d.relative_to(project_root).parts)
+        except ValueError:
+            depth = 0
+        if depth >= max_depth:
+            dirnames[:] = []
+        dirnames[:] = [x for x in dirnames
+                       if x not in excl and (d / x).resolve() != self_dir]
+        for fn in filenames:
+            path = d / fn
+            rel = str(path.relative_to(project_root))
+            low = fn.lower()
+            try:
+                if low.startswith("dockerfile"):
+                    for i, line in enumerate(
+                            path.read_text(encoding="utf-8", errors="replace").splitlines(), 1):
+                        m = re.match(r"\s*FROM\s+(?:--platform=\S+\s+)?(\S+)",
+                                     line, re.IGNORECASE)
+                        if m:
+                            add_image(m.group(1), f"{rel}:{i}")
+                elif re.fullmatch(r"(docker-)?compose[^/]*\.ya?ml", low):
+                    for i, line in enumerate(
+                            path.read_text(encoding="utf-8", errors="replace").splitlines(), 1):
+                        m = re.match(r"\s*image:\s*[\"']?([^\s\"'#]+)", line)
+                        if m:
+                            add_image(m.group(1), f"{rel}:{i}")
+                elif low == ".tool-versions":
+                    for i, line in enumerate(
+                            path.read_text(encoding="utf-8", errors="replace").splitlines(), 1):
+                        parts = line.split()
+                        if len(parts) >= 2 and parts[0] in TOOL_VERSIONS_MAP:
+                            candidates.append(_mk_candidate(
+                                TOOL_VERSIONS_MAP[parts[0]], line.strip(),
+                                f"{rel}:{i}", _version_from_text(parts[1])))
+                elif fn in VERSION_FILE_PRODUCT:
+                    first = path.read_text(encoding="utf-8",
+                                           errors="replace").strip().splitlines()
+                    if first:
+                        candidates.append(_mk_candidate(
+                            VERSION_FILE_PRODUCT[fn], first[0].strip(),
+                            f"{rel}:1", _version_from_text(first[0])))
+                elif fn == "package.json":
+                    data = json.loads(path.read_text(encoding="utf-8"))
+                    node = (data.get("engines") or {}).get("node")
+                    if node:
+                        candidates.append(_mk_candidate(
+                            "nodejs", f"engines.node: {node}",
+                            f"{rel} (engines.node)", _version_from_text(node)))
+                elif fn == "composer.json":
+                    data = json.loads(path.read_text(encoding="utf-8"))
+                    php = (data.get("require") or {}).get("php")
+                    if php:
+                        candidates.append(_mk_candidate(
+                            "php", f"require.php: {php}",
+                            f"{rel} (require.php)", _version_from_text(php)))
+            except (OSError, json.JSONDecodeError):
+                continue
+
+    # 同じ (製品, バージョン) は 1 件にまとめる（検出元は最初のもの）
+    seen, deduped = set(), []
+    for c in candidates:
+        key = (c["name"], c["version"])
+        if key not in seen:
+            seen.add(key)
+            deduped.append(c)
+    return {"candidates": deduped, "unsupported_images": unsupported}
+
+
+def _norm_version(v: str) -> tuple[str, bool]:
+    """宣言されたバージョンを照会用に正規化する。
+
+    '8.1' のようにパッチ版が無い宣言は下限 '8.1.0' として照会する
+    （version_exact: false）。多めに報告する方向にしか倒れない。
+    """
+    v = v.strip().lstrip("v")
+    parts = v.split(".")
+    exact = len(parts) >= 3
+    while len(parts) < 3:
+        parts.append("0")
+    return ".".join(parts), exact
 
 
 def _nvd_get(params: dict, api_key: str | None, retries: int = 4):
@@ -144,15 +298,16 @@ def _description(cve: dict) -> str:
     return ""
 
 
-def query_product(name: str, version: str, api_key: str | None,
+def query_product(name: str, version_query: str, version_raw: str,
+                  version_exact: bool, api_key: str | None,
                   cache_dir: Path, offline: bool, errors: list) -> list[dict]:
     """1 製品を照会して findings のリストを返す。"""
     prefixes = CPE_TABLE[name]
     by_cve: dict[str, dict] = {}
 
     for prefix in prefixes:
-        cpe_name = f"{prefix}:{version}:*:*:*:*:*:*:*"
-        cache = cache_dir / "nvd" / f"{name}-{version}-{prefix.split(':')[3]}.json"
+        cpe_name = f"{prefix}:{version_query}:*:*:*:*:*:*:*"
+        cache = cache_dir / "nvd" / f"{name}-{version_query}-{prefix.split(':')[3]}.json"
         data = None
         if cache.exists() and (time.time() - cache.stat().st_mtime) < KEV_CACHE_TTL:
             try:
@@ -161,7 +316,7 @@ def query_product(name: str, version: str, api_key: str | None,
                 data = None
         if data is None:
             if offline:
-                errors.append({"stage": "nvd", "product": f"{name}@{version}",
+                errors.append({"stage": "nvd", "product": f"{name}@{version_raw}",
                                "error": "offline mode: NVD 未照会"})
                 continue
             try:
@@ -170,14 +325,14 @@ def query_product(name: str, version: str, api_key: str | None,
                 cache.parent.mkdir(parents=True, exist_ok=True)
                 cache.write_text(json.dumps(data), encoding="utf-8")
             except RuntimeError as exc:
-                errors.append({"stage": "nvd", "product": f"{name}@{version}",
+                errors.append({"stage": "nvd", "product": f"{name}@{version_raw}",
                                "error": str(exc)})
                 continue
             # レート制限（キー無し 5req/30s）を尊重する
             time.sleep(1 if api_key else 7)
 
         if data.get("totalResults", 0) > len(data.get("vulnerabilities") or []):
-            errors.append({"stage": "nvd", "product": f"{name}@{version}",
+            errors.append({"stage": "nvd", "product": f"{name}@{version_raw}",
                            "error": f"結果が 2000 件を超えており一部のみ取得 "
                                     f"({data['totalResults']} 件)"})
 
@@ -193,8 +348,8 @@ def query_product(name: str, version: str, api_key: str | None,
                 "cve_ids": [cid],
                 "aliases": [],
                 "package": {
-                    "name": name, "ecosystem": "middleware", "version": version,
-                    "direct": True, "dev": False, "version_exact": True,
+                    "name": name, "ecosystem": "middleware", "version": version_raw,
+                    "direct": True, "dev": False, "version_exact": version_exact,
                     "manifests": ["config.yml (scan.middleware)"],
                 },
                 "summary": _description(cve)[:300],
@@ -243,6 +398,10 @@ def main() -> int:
     ap.add_argument("--offline", action="store_true", help="キャッシュのみ使用")
     ap.add_argument("--cache-dir", default=str(here / ".cache"))
     ap.add_argument("--list-products", action="store_true", help="対応製品の一覧を表示")
+    ap.add_argument("--suggest", action="store_true",
+                    help="リポジトリ内のヒント（Dockerfile 等）から宣言候補を出す。照会はしない")
+    ap.add_argument("--project-root", default=None,
+                    help="--suggest の走査対象。省略時は config の scan.project_root")
     args = ap.parse_args()
 
     if args.list_products:
@@ -254,6 +413,30 @@ def main() -> int:
     errors: list[dict] = []
     cache_dir = Path(args.cache_dir)
     api_key = os.environ.get("NVD_API_KEY") or None
+
+    if args.suggest:
+        root_raw = args.project_root or cfg_get(config, "scan.project_root", "..")
+        project_root = (Path(args.config).resolve().parent / root_raw).resolve()
+        excludes = cfg_get(config, "exclude_paths", []) or []
+        max_depth = int(cfg_get(config, "scan.max_depth", 6) or 6)
+        result = suggest_products(project_root, excludes, max_depth, self_dir=here)
+        out = {
+            "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "project_root": str(project_root),
+            "declared": cfg_get(config, "scan.middleware", []) or [],
+            **result,
+            "note": "これは宣言の候補であり、照会はしていない。正確なバージョンは"
+                    "サーバでの実測（php -v / nginx -v 等）で確認して scan.middleware に宣言する",
+        }
+        text = json.dumps(out, ensure_ascii=False, indent=2)
+        if args.out == "-":
+            sys.stdout.write(text + "\n")
+        else:
+            path = Path(args.out)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(text + "\n", encoding="utf-8")
+            sys.stderr.write(f"wrote {path}\n")
+        return 0
 
     # --- 対象の決定 -------------------------------------------------------
     products: list[tuple[str, str]] = []
@@ -276,8 +459,13 @@ def main() -> int:
     # --- 照会 -------------------------------------------------------------
     findings: list[dict] = []
     for name, version in products:
-        findings.extend(query_product(name, version, api_key,
-                                      cache_dir, args.offline, errors))
+        version_query, version_exact = _norm_version(version)
+        if not version_exact:
+            errors.append({"stage": "input_note",
+                           "error": f"{name}@{version} はパッチ版まで不明のため"
+                                    f"下限 {version_query} で照会（多めに出る）"})
+        findings.extend(query_product(name, version_query, version, version_exact,
+                                      api_key, cache_dir, args.offline, errors))
 
     # KEV 照合（OSV 側と同じカタログ・同じキャッシュを使う）
     kevidx = {} if args.no_kev else kev_index(load_kev(cache_dir, errors, args.offline))
